@@ -2,7 +2,7 @@
 
 > **Greenlight R5 — active reliability hardening**
 >
-> Greenlight Recur is validating the complete continual-training lifecycle: train → checkpoint → terminate → rebuild model and optimiser → reload → resume → evaluate/generate. The R5 checkpoint/restart reliability gate was merged into `main` in [PR #30](https://github.com/SpidermanTotro/mini-AGI/pull/30) (commit [`f5f823d`](https://github.com/SpidermanTotro/mini-AGI/commit/f5f823d83d153dd49cd59b53b1bdfbc491e684dd)). Normal AdamW reload and paged expert/optimiser restart regressions are included. Hardware-specific resume and long-running continual-training claims still require reproducible validation.
+> Greenlight Recur is validating the complete continual-training lifecycle: train → checkpoint → terminate → rebuild model and optimiser → reload → resume → evaluate/generate. The R5 checkpoint/restart reliability gate was merged into `main` in [PR #30](https://github.com/HenricHuntsman/mini-AGI/pull/30) (commit [`f5f823d`](https://github.com/HenricHuntsman/mini-AGI/commit/f5f823d83d153dd49cd59b53b1bdfbc491e684dd)). Normal AdamW reload and paged expert/optimiser restart regressions are included. Hardware-specific resume and long-running continual-training claims still require reproducible validation.
 
 **Greenlight Recur** is an experimental, local-first AI research project derived from [volotat/mini-AGI](https://github.com/volotat/mini-AGI). It focuses on making mini-AGI easier to test, reproduce, harden, and run on consumer hardware while keeping failures visible instead of treating a green loss curve as proof that the whole training lifecycle works.
 
@@ -136,7 +136,7 @@ Benchmark results should only be compared when the model, dataset, checkpoint, c
 Greenlight Recur exists because of the original **mini-AGI** project and its architecture, training work, experiments, and continued upstream development.
 
 - Original project: https://github.com/volotat/mini-AGI
-- Greenlight Recur development repository: https://github.com/SpidermanTotro/mini-AGI
+- Greenlight Recur development repository: https://github.com/HenricHuntsman/mini-AGI
 
 ---
 
