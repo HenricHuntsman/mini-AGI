@@ -244,6 +244,8 @@ def resume_preflight(weights_dir: str | Path, build=None) -> dict:
             or any(not isinstance(entry, dict)
                    or not isinstance(entry.get("file"), str)
                    or not entry["file"]
+                   or entry["file"] in (".", "..")
+                   or "/" in entry["file"] or "\\\\" in entry["file"]
                    for entry in manifest.get("experts", []))):
         return _preflight_report(path, {}, [Finding(
             "INVALID_CHECKPOINT_MANIFEST", "critical",
