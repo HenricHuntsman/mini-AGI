@@ -349,6 +349,8 @@ def load(model, path, opt=None, device=None, strict=False, verbose=False):
     device = device or next(model.parameters()).device
     with open(os.path.join(path, "manifest.json")) as f:
         man = json.load(f)
+    if not isinstance(man, dict):
+        raise ValueError("checkpoint manifest must be a JSON object")
     entries = man.get("experts")
     if not isinstance(entries, list):
         raise ValueError("checkpoint manifest must contain an experts list")
