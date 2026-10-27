@@ -182,7 +182,8 @@ def _self_facts():
                                      100_000_000)).replace("_", ""))
     f["survival_chars_m"] = f["survival_chars"] / 1e6
     f["dying_at"] = _g(c, "prune.dying_at", 0.65)
-    f["balance"] = _g(c, "pool.balance", 0.0)
+    # PyYAML may parse scientific notation without a decimal point as text.
+    f["balance"] = float(_g(c, "pool.balance", 0.0) or 0.0)
     f["min_visit_chunks"] = _g(c, "data.min_visit_chunks", 16)
     f["context_step"] = _g(c, "model.context_step", 1)
     f["visit_chars"] = f["min_visit_chunks"] * f["chunk"]
