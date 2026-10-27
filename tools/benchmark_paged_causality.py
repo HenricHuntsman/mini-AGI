@@ -35,6 +35,7 @@ def benchmark(device, tokens, experts, resident, width, repeats):
                      w2=rng.standard_normal((width, width)).astype("float32") * .02)
         pool = PagedPool(tmp, width, width, experts, resident=resident,
                          ram_capacity=experts, device=device, read_only=True)
+        pool.to(device)
         model = PooledMLP(pool, width, top_k=1, grad_checkpoint=False,
                           capacity_factor=0).to(device).eval()
         x = torch.randn(1, tokens, width, device=device)
