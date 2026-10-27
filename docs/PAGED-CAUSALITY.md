@@ -35,7 +35,15 @@ position, full residency, and inactive future positions. CI runs on Python
   fixed resident expert budget.
 - Benchmark no-grad prompt evaluation against the old batched path. Sequential
   admission trades throughput for causal correctness; do not assume an RTX
-  5060 Ti result from CPU CI.
+  5060 Ti result from CPU CI. An opt-in, read-only synthetic benchmark is
+  available:
+  ```bash
+  python tools/benchmark_paged_causality.py --device cpu --tokens 32
+  python tools/benchmark_paged_causality.py --device cuda --tokens 32
+  ```
+  The `legacy_noncausal` measurement is only a speed baseline; its outputs
+  are not a correctness reference. CUDA must be available for the second
+  command. This script never writes checkpoints or trained weights.
 - Evaluate multiple independent sequences per batch: a shared resident budget
   still allows one sequence's requests to influence another's admitted set.
 - Test stochastic expert selection (`select_temperature > 0`) with
