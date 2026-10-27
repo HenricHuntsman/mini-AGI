@@ -1,6 +1,6 @@
 # DragonForge Android v0.1
 
-Initial native Android companion target: **Samsung Galaxy S21 Ultra**.
+Initial native Android companion target: **Android 11+ devices**.\nThe UI is not restricted to one Samsung model; actual compatibility must be\nvalidated on each target device before claiming support.
 
 The phone is a companion to the Linux DragonForge / Greenlight Recur host. Model
 training stays on Linux; Android displays status and diagnostics over the
