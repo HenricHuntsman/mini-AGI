@@ -9,7 +9,19 @@ Status labels:
 - **Superseded failure** — an older development revision that failed CI and
   was replaced by a later commit. GitHub keeps these historical runs visible.
 
-## 2026-10-28 — In review (not merged)\n\n- Draft PR #44: YAML numeric balance normalization for self-knowledge.\n- Draft PR #45: CPU paged-expert causality regression reproduction; the\n  defect is **not fixed** by the test-only PR.\n- Draft PR #46: Training Doctor malformed-manifest diagnostics.\n- Draft PR #47: checkpoint loader manifest safety checks.\n- Draft PR #48: corrected checkpoint recovery documentation.\n- Maintenance branch: full tracked-file inventory, documentation references\n  and folder ownership policy. These are **not** production model changes.\n- Branch CI passed on #44–#48; do not infer GPU validation or merged status.\n\n## 2026-10-06
+## 2026-10-28 — In review (not merged)
+
+- Draft PR #44: YAML numeric balance normalization for self-knowledge.
+- Draft PR #45: CPU paged-expert causality regression reproduction; the
+  defect is **not fixed** by the test-only PR.
+- Draft PR #46: Training Doctor malformed-manifest diagnostics.
+- Draft PR #47: checkpoint loader manifest safety checks.
+- Draft PR #48: corrected checkpoint recovery documentation.
+- Maintenance branch: full tracked-file inventory, documentation references
+  and folder ownership policy. These are **not** production model changes.
+- Branch CI passed on #44–#48; do not infer GPU validation or merged status.
+
+## 2026-10-06
 
 ### Stable — checkpoint parameter accounting
 
