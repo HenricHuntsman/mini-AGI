@@ -24,7 +24,7 @@ are **not** included in the Git tree and must be backed up separately.
 
 Run `python tools/check_file_inventory.py` from the repository root.
 The checker validates this dated snapshot's declared counts, duplicate paths,
-unsafe paths and missing files. It runs in Python 3.11/3.14 CI.
+unsafe paths (including symlinks escaping the repository) and missing files. It runs in Python 3.11/3.14 CI.
 It does **not** require newly added files to appear in this historical snapshot;
 update the snapshot date and counts deliberately when publishing a new inventory.
 This is a read-only file check, not a dependency, security, or GPU audit.
