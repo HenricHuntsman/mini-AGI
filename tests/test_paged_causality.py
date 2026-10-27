@@ -1,9 +1,9 @@
 """CPU-only diagnostic for upstream issue #33: paged admission looks ahead.
 
 A chunk's first prediction should not change just because future characters
-change. Current paged admission aggregates router votes over the whole chunk,
-so the one-slot variant is a known *expected failure*. Keep the expectedFailure
-marker until the routing design is repaired; then remove it.
+change. Paged evaluation now admits in position order, so future suffixes must not
+change the first position. Training still uses batched admission and needs
+separate design and regression coverage.
 """
 import tempfile
 import unittest
@@ -51,9 +51,8 @@ class PagedCausalityTests(unittest.TestCase):
         first_a, first_b = first_outputs(resident=2)
         torch.testing.assert_close(first_a, first_b, rtol=0, atol=1e-6)
 
-    @unittest.expectedFailure
     def test_paged_first_position_is_suffix_invariant(self):
-        # Known causal-leak regression from volotat/mini-AGI#33.
+        # Regression originally identified in volotat/mini-AGI#33.
         # Different future suffixes must not change the same first position.
         first_a, first_b = first_outputs(resident=1)
         torch.testing.assert_close(first_a, first_b, rtol=0, atol=1e-6)
