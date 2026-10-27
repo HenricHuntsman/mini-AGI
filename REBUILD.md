@@ -45,6 +45,47 @@ The execution path is:
 overview and original run instructions. The model is trained from scratch;
 there is no pretrained checkpoint in this repository.
 
+## Checkpoint recovery and safe debugging
+
+**Do not use your only trained weights directory as a debugging target.**
+Before investigating a failed restart, stop all processes that write to the
+checkpoint and make a complete copy of the directory, including
+`manifest.json`, `core.npz`, `routers.npz`, `optim.npz` (when present),
+and every file in `experts/`. Keep the original read-only.
+
+A checkpoint save replaces **individual files** atomically. This does **not**
+make the entire multi-file checkpoint a transactional snapshot. If the process
+stops during a save, files can belong to different save stages even when each
+file is individually readable. Never infer a successful resume merely from a
+valid manifest or a successful JSON parse.
+
+On a copy of the checkpoint, run the Training Doctor first:
+
+```bash
+python training_doctor.py --help
+python -m unittest discover -s tests -v
+```
+
+Review the actual Doctor CLI arguments before using it against weights. For a
+meaningful recovery check, build a fresh model **and** optimizer from the
+matching configuration, load the copy, run a small evaluation, take an
+optimizer step, and verify that both model and optimizer steps advanced.
+Use the cold-process restart tests in
+`tests/test_checkpoint_reload_resume.py` as the CPU reference.
+
+### Ongoing hardening work (not yet part of `main`)
+
+- Draft PR #44: normalize scientific-notation `pool.balance` in chat facts.
+- Draft PR #45: reproduce paged-admission future-token influence; the known
+  failing case remains explicitly marked as expected failure.
+- Draft PR #46: report invalid checkpoint manifests through Training Doctor.
+- Draft PR #47: reject malformed or unsafe expert entries during checkpoint
+  loading.
+
+The draft PRs are separate reviews; their passing branch tests do not mean
+they have been merged. Neither a CPU regression suite nor a syntactically
+valid manifest proves a long-running GPU resume on the actual 16 GB profile.
+
 ## Clean Setup
 
 The documented reference environment is Python 3.10 or newer and an
