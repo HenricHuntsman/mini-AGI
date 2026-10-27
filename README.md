@@ -31,7 +31,7 @@ The mobile clients are experimental. The R5 cold-restart and optimizer-state rel
 
 R5 is intentionally reliability-first. Architecture and router experiments stay isolated until checkpoint/restart behaviour is trustworthy.
 
-## Greenlight command line
+Project navigation: [tracked file inventory](docs/FILE-INVENTORY.md) ·\n[rebuild and recovery](REBUILD.md) · [development history](docs/HISTORY.md) ·\n[mobile companions](mobile/README.md).\n\n## Greenlight command line
 
 Install the dependencies into your active Python environment:
 
