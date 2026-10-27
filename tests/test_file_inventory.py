@@ -63,5 +63,26 @@ class InventoryValidatorTests(unittest.TestCase):
         self.assertTrue(any("unsafe inventory path" in error for error in errors))
 
 
+    def test_reject_windows_style_traversal(self):
+        errors = inspect_inventory(
+            self.inventory(docs_count=2, total=3,
+                           paths=["README.md", "docs/HISTORY.md",
+                                  "docs/..\\\\secret.txt"]),
+            self.root)
+        self.assertTrue(any("unsafe inventory path" in error for error in errors))
+
+    def test_reject_symlink_outside_repository(self):
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / "secret.txt"
+            target.write_text("outside", encoding="utf-8")
+            (self.root / "docs" / "link.txt").symlink_to(target)
+            errors = inspect_inventory(
+                self.inventory(docs_count=2, total=3,
+                               paths=["README.md", "docs/HISTORY.md",
+                                      "docs/link.txt"]),
+                self.root)
+            self.assertTrue(any("unsafe inventory path" in error for error in errors))
+
+
 if __name__ == "__main__":
     unittest.main()
