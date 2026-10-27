@@ -34,6 +34,12 @@ class InvalidManifestPreflightTests(unittest.TestCase):
     def test_empty_expert_filename(self):
         self.assert_invalid('{"experts": [{"file": ""}]}')
 
+    def test_parent_directory_escape_is_rejected(self):
+        self.assert_invalid('{"experts": [{"file": "../outside.npz"}]}')
+
+    def test_windows_directory_escape_is_rejected(self):
+        self.assert_invalid('{"experts": [{"file": "..\\\\outside.npz"}]}')
+
 
 if __name__ == "__main__":
     unittest.main()
