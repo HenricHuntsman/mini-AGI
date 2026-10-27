@@ -232,7 +232,23 @@ def resume_preflight(weights_dir: str | Path, build=None) -> dict:
                     {"weights_dir": str(path)}))]}
 
     import json
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return _preflight_report(path, {}, [Finding(
+            "INVALID_CHECKPOINT_MANIFEST", "critical",
+            "Checkpoint manifest cannot be read as JSON; resume is blocked.",
+            {"error": f"{type(exc).__name__}: {exc}"})], [], None)
+    if (not isinstance(manifest, dict)
+            or not isinstance(manifest.get("experts", []), list)
+            or any(not isinstance(entry, dict)
+                   or not isinstance(entry.get("file"), str)
+                   or not entry["file"]
+                   for entry in manifest.get("experts", []))):
+        return _preflight_report(path, {}, [Finding(
+            "INVALID_CHECKPOINT_MANIFEST", "critical",
+            "Checkpoint manifest has an invalid structure; resume is blocked.",
+            {})], [], None)
     missing = [entry["file"] for entry in manifest.get("experts", [])
                if not (path / store.EXPERTS / entry["file"]).exists()]
     if missing:
