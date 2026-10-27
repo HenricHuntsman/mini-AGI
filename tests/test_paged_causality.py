@@ -78,6 +78,32 @@ class PagedCausalityTests(unittest.TestCase):
                     output[0, 1:], torch.zeros_like(output[0, 1:]),
                     rtol=0, atol=0)
 
+    def test_paged_middle_position_is_suffix_invariant(self):
+        # Same prefix, different future tokens: not just position zero.
+        with tempfile.TemporaryDirectory() as td:
+            for expert in range(2):
+                np.savez(
+                    Path(td) / f"e{expert:05d}.npz",
+                    w1=np.eye(2, dtype=np.float32),
+                    w3=np.eye(2, dtype=np.float32),
+                    w2=(expert + 1) * np.eye(2, dtype=np.float32),
+                )
+            pool = PagedPool(td, 2, 2, 2, resident=1, ram_capacity=2,
+                             device="cpu", read_only=True)
+            model = PooledMLP(pool, 2, top_k=1, grad_checkpoint=False,
+                              capacity_factor=0).eval()
+            with torch.no_grad():
+                model.router.weight.copy_(torch.eye(2))
+                model.depth_emb.zero_()
+                prefix = [[1.0, 0.0], [0.0, 1.0]]
+                outputs = []
+                for suffix in ([[0.0, 8.0]], [[8.0, 0.0]]):
+                    pool.begin_text(False)
+                    x = torch.tensor([prefix + suffix])
+                    outputs.append(model(x)[0, 1].clone())
+                torch.testing.assert_close(outputs[0], outputs[1],
+                                           rtol=0, atol=1e-6)
+
     def test_paged_first_position_is_suffix_invariant(self):
         # Regression originally identified in volotat/mini-AGI#33.
         # Different future suffixes must not change the same first position.
