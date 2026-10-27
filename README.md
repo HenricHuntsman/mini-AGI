@@ -213,8 +213,7 @@ was playing with his friends when they saw another boy. They were playing togeth
 Tom's friend, Sam, saw them. "Wh
 
 --- code ---
-prompt: 'def merge_sorted(a, b):
-    '
+prompt: 'def merge_sorted(a, b):\n    '
 [raw]  repeated 8-grams 81%
 """
     A sorted array of sorted array of sorted array of sorted array of sorted array of sorted array of sorted array of sorted array of so
@@ -253,22 +252,14 @@ add 394085 + 726139 = <think> 0+9=0c0 8+6+0=4c1 2-0-1=1b0 4-7-0=7b1 3-0-1=2b0 </
 ad
 
 --- chat ---
-prompt: '<user>
-What are you?
-</user>
-<bot>
-'
+prompt: '<user>\nWhat are you?\n</user>\n<bot>\n'
 [raw]  repeated 8-grams 0%
 My name is mini-AGI. I am a language model that reads and writes single characters - the 256 byte values and 9 markers for structure - so I 
 [adapted]  repeated 8-grams 0%
 My name is mini-AGI. I am a language model that reads and writes single characters - the 256 byte values and 9 markers for structure - so I 
 
 --- chat_hermes ---
-prompt: '<user>
-A train travels 60 km in 45 minutes. What is its speed in km/h?
-</user>
-<bot>
-'
+prompt: '<user>\nA train travels 60 km in 45 minutes. What is its speed in km/h?\n</user>\n<bot>\n'
 [raw]  repeated 8-grams 28%
 The train travels 60 km in 45 minutes in 45 minutes. Its speed in km/h is 60 minutes per minute. The train travels 60 km in x 60 minutes in 
 [adapted]  repeated 8-grams 8%
@@ -279,12 +270,7 @@ speed = (1/2)*(45 minutes)
 First, we need to find the speed of the trai
 
 --- reasoning ---
-prompt: '<user>
-Write a Python function that returns the largest number in a list.
-</user>
-<bot>
-<think>
-'
+prompt: '<user>\nWrite a Python function that returns the largest number in a list.\n</user>\n<bot>\n<think>\n'
 [raw]  repeated 8-grams 1%
 Okay, let's see. I need to write a Python function called largest_number that takes a list as input. Let's start with 'largest'. The functio
 [adapted]  repeated 8-grams 1%
@@ -293,8 +279,7 @@ Okay, let's see. I need to write a Python function called largest_number that ca
 F
 
 --- wikipedia ---
-prompt: '== History ==
-The [[Roman Empire]] was '
+prompt: '== History ==\nThe [[Roman Empire]] was '
 [raw]  repeated 8-grams 50%
 founde1-to-12. The [[.September 19]] [[1999]] was a [[second major major major major major major major major major major major major major m
 [adapted]  repeated 8-grams 4%
@@ -309,11 +294,7 @@ Nf3 d6 3. d4 f6 4. d5 c6 5. c4 cxd5 6. cxd5 a6 7. Nc3 Bb4 8. Bd3 Bxd2+ 9. Bxd2 N
 Nf3 d6 3. Bc4 Nf6 4. d3 Be7 5. h3 O-O 6. Nc1 Be6 7. Bb3 Nc6 8. a4 Nd7 9. O-O f5 10. exf5 Bxf5 11. Ne4 Bxe4 12. dxe4 Nf6 13. Qd3 Nh5 14. Bg5 
 
 --- self-knowledge ---
-prompt: '<user>
-how do you decide which experts to use?
-</user>
-<bot>
-'
+prompt: '<user>\nhow do you decide which experts to use?\n</user>\n<bot>\n'
 [raw]  repeated 8-grams 0%
 The text votes. On the first pass of a forward every character ranks all 397 experts and asks for its top 8, each request weighted by how su
 [adapted]  repeated 8-grams 0%
