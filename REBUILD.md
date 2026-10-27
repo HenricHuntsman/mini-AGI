@@ -63,6 +63,7 @@ On a copy of the checkpoint, run the Training Doctor first:
 
 ```bash
 python training_doctor.py --help
+python training_doctor.py /path/to/checkpoint-copy --preflight --json
 python -m unittest discover -s tests -v
 ```
 
