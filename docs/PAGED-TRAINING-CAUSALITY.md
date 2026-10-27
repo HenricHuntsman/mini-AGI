@@ -10,6 +10,20 @@ to influence earlier outputs.
 autograd disabled **only to isolate the admission decision**. It is not a
 gradient correctness test or proof of training stability.
 
+## Independent-sequence batching limitation
+
+The same diagnostic module also contains an expected-failure test for a
+separate issue: two independent sequences in a batch currently share one
+expert-admission vote and a single resident budget. Changing one sequence's
+current token can change another sequence's output. This remains true in
+no-grad evaluation for a one-position batch; processing positions in order
+does not isolate independent sequences.
+
+The two issues need distinct fixes: training future-token leakage and
+cross-sequence admission interference. A future fix must specify whether
+batches use per-sequence resident sets, separate forwards, or a deterministic
+shared-card policy, and measure the resulting VRAM and throughput costs.
+
 ## Design constraints for the eventual fix
 
 1. Training must preserve autograd through the selected experts and router.
