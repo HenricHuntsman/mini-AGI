@@ -29,5 +29,7 @@ jobs:
           python -m pip install -r requirements.txt "Flask>=3.0"
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
+      - name: Check repository file inventory
+        run: python tools/check_file_inventory.py
       - name: Compile Python sources
         run: python -m compileall -q minagi corpora mini_agent tests tools train.py serve.py greenlight_lab.py greenlight.py
