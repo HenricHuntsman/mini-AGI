@@ -6,9 +6,16 @@ The old path is for timing comparison ONLY; it is not causally correct.
 """
 import argparse
 import json
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+# Running `python tools/benchmark_paged_causality.py` sets sys.path[0] to
+# tools/, not the repository root. Keep the documented direct CLI working
+# without requiring PYTHONPATH or installing the package.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
