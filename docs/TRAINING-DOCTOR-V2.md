@@ -29,7 +29,10 @@ PY="$(pwd)/.venv/bin/python"   # from the repository root after venv setup
 "$PY" training_doctor.py --samples runs/samples.txt
 ```
 
-The Python path above is a local example, not a hard-coded installation path.\nUse the interpreter from your own environment; see [REBUILD.md](../REBUILD.md).\n\n`--json` emits machine-readable output, `--out PATH` also writes it. Exit code
+The Python path above is a local example, not a hard-coded installation path.
+Use the interpreter from your own environment; see [REBUILD.md](../REBUILD.md).
+
+`--json` emits machine-readable output, `--out PATH` also writes it. Exit code
 is 1 when health is `critical`, otherwise 0.
 
 ## Mode 1 — history
