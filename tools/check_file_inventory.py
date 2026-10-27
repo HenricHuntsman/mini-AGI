@@ -49,7 +49,9 @@ def inspect_inventory(text: str, root: Path) -> list[str]:
                 continue
             path = entry.group(1)
             paths[current].append(path)
-            if Path(path).is_absolute() or ".." in Path(path).parts:
+            candidate = root / path
+            if (Path(path).is_absolute() or ".." in Path(path).parts
+                    or chr(92) in path or not candidate.resolve().is_relative_to(root.resolve())):
                 errors.append(f"unsafe inventory path: {path}")
                 continue
             actual_group = path.split("/", 1)[0] if "/" in path else "(root)"
