@@ -43,6 +43,32 @@ class PagedTrainingCausalityTests(unittest.TestCase):
                                            rtol=0, atol=1e-6)
 
 
+    def test_full_resident_training_backward_has_finite_gradients(self):
+        # Control: a fully resident card must still support autograd. This
+        # checks the training graph, not the unsolved paged admission issue.
+        with tempfile.TemporaryDirectory() as td:
+            for expert in range(2):
+                np.savez(Path(td) / f"e{expert:05d}.npz",
+                         w1=np.eye(2, dtype=np.float32),
+                         w3=np.eye(2, dtype=np.float32),
+                         w2=(expert + 1) * np.eye(2, dtype=np.float32))
+            pool = PagedPool(td, 2, 2, 2, resident=2,
+                             ram_capacity=2, device="cpu", read_only=True)
+            model = PooledMLP(pool, 2, top_k=2, grad_checkpoint=False,
+                              capacity_factor=0).train()
+            with torch.no_grad():
+                model.router.weight.copy_(torch.eye(2))
+                model.depth_emb.zero_()
+            pool.begin_text(True)
+            x = torch.tensor([[[1., .5], [.5, 1.]]])
+            output = model(x)
+            self.assertTrue(torch.isfinite(output).all())
+            output.square().sum().backward()
+            self.assertIsNotNone(model.router.weight.grad)
+            self.assertTrue(torch.isfinite(model.router.weight.grad).all())
+            self.assertIsNotNone(pool.w1.grad)
+            self.assertTrue(torch.isfinite(pool.w1.grad).all())
+
     @unittest.expectedFailure
     def test_eval_batch_sequences_do_not_change_each_others_admission(self):
         # Independent batch members currently share one admission vote and
