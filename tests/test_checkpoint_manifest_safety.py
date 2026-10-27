@@ -19,6 +19,9 @@ class CheckpointManifestSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, message):
                 store.load(torch.nn.Linear(1, 1), tmp)
 
+    def test_manifest_must_be_object(self):
+        self.assert_rejected([], "JSON object")
+
     def test_missing_experts_list(self):
         self.assert_rejected({"n_experts": 0}, "experts list")
 
