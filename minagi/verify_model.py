@@ -25,17 +25,38 @@ def inspect_model_artifact(path):
             f"incomplete model artifact {root}: missing {', '.join(missing)}"
         )
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("model manifest must be a JSON object")
     entries = manifest.get("experts")
     if not isinstance(entries, list) or not entries:
         raise ValueError("model manifest contains no expert file inventory")
-    declared = int(manifest.get("n_experts", len(entries)))
+    try:
+        declared = int(manifest.get("n_experts", len(entries)))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid n_experts in model manifest") from exc
     if declared != len(entries):
         raise ValueError(
             f"model manifest declares {declared} experts but inventories {len(entries)}"
         )
+    names, ids = set(), set()
+    expert_dir = (root / "experts").resolve()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("model expert inventory entry must be an object")
+        name, uid = entry.get("file"), entry.get("id")
+        if (not isinstance(name, str) or not name
+                or name in (".", "..") or "/" in name or chr(92) in name
+                or not name.endswith(".npz")):
+            raise ValueError("model expert filename is invalid")
+        if type(uid) is not int or uid < 0 or uid in ids or name in names:
+            raise ValueError("model expert ID or filename is invalid or duplicate")
+        if not (expert_dir / name).resolve().is_relative_to(expert_dir):
+            raise ValueError("model expert filename escapes experts directory")
+        names.add(name)
+        ids.add(uid)
     missing_experts = [
-        entry.get("file") for entry in entries
-        if not entry.get("file") or not (root / "experts" / entry["file"]).is_file()
+        entry["file"] for entry in entries
+        if not (expert_dir / entry["file"]).is_file()
     ]
     if missing_experts:
         raise FileNotFoundError(
