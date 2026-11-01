@@ -128,14 +128,19 @@ def main():
                     label=d if g == segs[0] else None)
     frame(ax, "Which domains are moving", "held-out per domain, nats")
     ax.set_yscale("log")
+    # The subjects sit between powers of ten, so a log axis that labels only
+    # those (0.1, 1) labels nothing here: the ticks between them carry the
+    # numbers, as in the panel beside it.
     ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
-    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.ScalarFormatter())
     if names:
         ax.legend(fontsize=7, frameon=False, ncol=2, loc="best")
 
     # ----------------------------------- 3. what the rate controller thinks
     ax = fig.add_subplot(gs[0, 2])
     lr = col("lr")
+    # the rate the controller sets: every expert's, and the trunk's times its
+    # multiplier
     for g in segs:
         ax.plot(x[g], lr[g], lw=1.8, color=VAL)
     ax.set_ylabel("lr", color=VAL, fontsize=8.5)
@@ -144,14 +149,18 @@ def main():
     ev = col("evidence")
     for g in segs:
         q.plot(x[g], ev[g], lw=1, color="#9467bd")
+    # the controller's verdict against T_MID in minagi/plasticity.py: above
+    # it the rate eases up, below it down (the rows the plateau controller
+    # wrote on 10 October carry its improvement in sd here instead)
     at = 2.2
     q.axhline(at, color="#9467bd", ls="--", lw=.9, alpha=.7)
-    q.text(x.max(), at, " raises above here", fontsize=7, color="#9467bd",
-           ha="right", va="bottom")
+    # at the left, clear of the newest readings at the right-hand end
+    q.text(x.min(), at, " raises above here", fontsize=7, color="#9467bd",
+           ha="left", va="bottom")
     q.set_ylabel("evidence t", color="#9467bd", fontsize=8)
     q.tick_params(labelsize=7)
     q.spines["top"].set_visible(False)
-    frame(ax, "Learning rate, and why", "the controller raises only on clear evidence")
+    frame(ax, "Learning rate, and why", "eased at every check unless held-out is clearly improving")
 
     # -------------------------------------------- 4. who does the work
     g_ = np.abs(np.asarray(tel.get("gate") or [], float))

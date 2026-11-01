@@ -263,10 +263,14 @@ class PagedCheckpointReloadResumeTests(unittest.TestCase):
             restarted_pool._own_moments()
             slot = restarted_pool.slots.index(expert_id)
             state = restarted_opt.state[restarted_pool.w1]
+            # Upstream stores moments as bf16 and widens them for AdamW.
+            self.assertEqual(expected_m.dtype, torch.bfloat16)
+            self.assertEqual(expected_v.dtype, torch.bfloat16)
+            self.assertEqual(state["exp_avg"].dtype, torch.float32)
             self.assertTrue(torch.allclose(
-                state["exp_avg"][slot].cpu(), expected_m, rtol=2e-2, atol=1e-6))
+                state["exp_avg"][slot].cpu(), expected_m.float(), rtol=2e-2, atol=1e-6))
             self.assertTrue(torch.allclose(
-                state["exp_avg_sq"][slot].cpu(), expected_v,
+                state["exp_avg_sq"][slot].cpu(), expected_v.float(),
                 rtol=2e-2, atol=1e-6))
 
             loss = restarted(tokens)[0].float().square().mean()

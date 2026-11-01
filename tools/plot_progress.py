@@ -13,17 +13,19 @@ import re
 
 import json
 import os
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from minagi import heldout                                  # noqa: E402
+
 # The header gained the corpus total partway through the project, so both
 # shapes appear in one file and the older half is the early history.
-HEAD = re.compile(
-    r"^step ([\d,]+)\s+([\d.]+)M (?:of ([\d,]+)M )?characters"
-    r"[^\n]*?(\d+) min(?:\s+(\d+) experts)?", re.M)
+HEAD = heldout.LOG_HEAD
 
 
 DYING_AT, SURVIVAL_CHARS, CHUNK = 0.75, 0, 1536
@@ -73,44 +75,10 @@ def _dead_pct(r):
 
 
 def parse(path):
-    txt = open(path, errors="ignore").read()
-    rows = []
-    for m in HEAD.finditer(txt):
-        blk = txt[m.end():m.end() + 700]
-        r = {"step": int(m.group(1).replace(",", "")),
-             "chars": float(m.group(2)),
-             "corpus": (float(m.group(3).replace(",", ""))
-                        if m.group(3) else None),
-             "min": int(m.group(4)),
-             "experts": int(m.group(5)) if m.group(5) else None}
-        g = re.search(r"context ([\d,]+) characters", blk)
-        r["context"] = int(g.group(1).replace(",", "")) if g else None
-        g = re.search(r"reading ([\d,]+) char/s", blk)
-        r["rate"] = int(g.group(1).replace(",", "")) if g else None
-        g = re.search(r"train loss ([\d.]+)", blk)
-        r["train"] = float(g.group(1)) if g else None
-        g = re.search(r"lr ([\d.e+-]+)", blk)
-        r["lr"] = float(g.group(1)) if g else None
-        g = re.search(r"evidence t ([+-][\d.]+) over (\d+)", blk)
-        r["evidence"] = float(g.group(1)) if g else None
-        r["evidence_n"] = int(g.group(2)) if g else None
-        g = re.search(r"\(effect ([+-][\d.]+)\)", blk)
-        r["effect"] = float(g.group(1)) if g else None
-        g = re.search(r"grad norm ([\d.]+)", blk)
-        r["gnorm"] = float(g.group(1)) if g else None
-        g = re.search(r"held-out loss ([\d.]+) \+/-([\d.]+)", blk)
-        if g:
-            r["val"], r["se"] = float(g.group(1)), float(g.group(2))
-        g = re.search(r"^  ([a-z_]+ [\d.]+(?:   [a-z_]+ [\d.]+)*)\s*$", blk, re.M)
-        if g:
-            parts = g.group(1).split()
-            r["dom"] = {parts[i]: float(parts[i + 1])
-                        for i in range(0, len(parts) - 1, 2)}
-        rows.append(r)
-    corpus = next((r["corpus"] for r in reversed(rows) if r["corpus"]), None)
-    for r in rows:
-        r["corpus"] = r["corpus"] or corpus
-    return rows
+    """Every entry in a sample log, oldest first, with held-out on one level
+    - minagi/heldout.py parse_log, which the trainer reads the log with too."""
+    return heldout.parse_log(path)
+
 
 
 def main():
@@ -297,11 +265,10 @@ def main():
                    for r in rows], float)
     if np.isfinite(ev).any():
         # what the controller can prove, so the rate is readable even when it
-        # is not moving: above +2 it eases up, below +0.5 it eases down
+        # is not moving: above T_MID (2.2) it eases up, below it down
         pe = p.twinx()
         pe.plot(x, ev, lw=1.0, color="#984ea3", alpha=.75)
-        pe.axhline(2.0, color="#984ea3", ls=":", lw=.8)
-        pe.axhline(0.5, color="#984ea3", ls=":", lw=.8)
+        pe.axhline(2.2, color="#984ea3", ls=":", lw=.8)
         pe.set_ylabel("evidence t", color="#984ea3", fontsize=9)
         pe.tick_params(axis="y", labelcolor="#984ea3", labelsize=8)
         pe.spines["right"].set_position(("outward", 38))
