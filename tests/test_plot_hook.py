@@ -50,25 +50,27 @@ with open(LOG, "w") as _f:
 saved = dict(T._PLOTS)
 try:
     # --- off means off ---------------------------------------------------
-    T._PLOTS.update(on=False, proc=None, since=None, log=None,
+    T._PLOTS.update(on=False, procs=[], since=None, log=None,
                     weights=None)
     T.refresh_plots()
-    check("disabled draws nothing", T._PLOTS["proc"] is None)
+    check("disabled draws nothing", not T._PLOTS["procs"])
 
     # --- it returns without waiting --------------------------------------
     # the graphs go to a folder of the test's own: the plotter would
     # otherwise draw this fake run over the real run's runs/ graphs, and
     # the README copies runs/training_progress.png
-    T._PLOTS.update(on=True, proc=None, since=None, log=LOG,
+    T._PLOTS.update(on=True, procs=[], since=None, log=LOG,
                     weights=None, out=_tmp)
     t0 = time.time()
     T.refresh_plots()
     el = time.time() - t0
-    p = T._PLOTS["proc"]
+    children = T._PLOTS["procs"]
+    p = children[0] if children else None
     check("returns immediately", el < 1.0, f"{el*1000:.0f} ms")
     check("something was spawned", p is not None)
     if p is not None:
-        p.wait()
+        for child in children:
+            child.wait(timeout=60)
         check("and it succeeds, drawing where it was told and only there",
               p.returncode == 0
               and os.path.exists(os.path.join(_tmp, "training_progress.png")),
@@ -81,18 +83,18 @@ try:
         def poll(self):
             return None                      # still going
 
-    T._PLOTS.update(proc=Busy())
+    T._PLOTS.update(procs=[Busy()])
     T.refresh_plots()
     check("a second call while busy is skipped",
-          isinstance(T._PLOTS["proc"], Busy))
+          isinstance(T._PLOTS["procs"][0], Busy))
 
     # --- a missing tool disables it rather than raising every time -------
     # pointed at a folder with no plotter in it: renaming the real one, as
     # this did, could switch a running run's own graphs off for good
-    T._PLOTS.update(on=True, proc=None, tools=os.path.join(_tmp, "no-tools"))
+    T._PLOTS.update(on=True, procs=[], tools=os.path.join(_tmp, "no-tools"))
     T.refresh_plots()
     check("a missing plotter turns the hook off, quietly",
-          T._PLOTS["on"] is False and T._PLOTS["proc"] is None)
+          T._PLOTS["on"] is False and not T._PLOTS["procs"])
     T._PLOTS.update(on=True, tools=None)
 
     # --- write_samples calls it ------------------------------------------

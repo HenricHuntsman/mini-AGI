@@ -37,6 +37,25 @@ and say what is new (conventions.md). E-numbers point into experiments.md.
 - SETTLED: compute bf16; fp16 never (E13); fp32 on a GPU without bf16 when it has >= 14 GiB, else emulated
   bf16 (`tools/device_check.py`). Adam moments stored bf16 on disk and in RAM.
 - REJECTED: gradient accumulation (E7, no gain; flag stays 1).
+- Writing without loops (11-06, an agent's change, uncommitted until the author decides): loop practice
+  (`training.loop_practice_every` 8, `minagi/practice.py`) teaches the weights that a repetition must not feed
+  itself; from the same weights and 3M characters every 8th step cost +0.0003 held-out and took the sample
+  prompts from 32.5% to 18.1% repeated 8-grams, every 2nd step +0.003 and 12.5% (E57). REJECTED: a tie
+  preference against the copy at free choices (no measurable effect, E57); leaving the first copy free (no
+  change, E57). Arithmetic's free-running loop remains: the lane's own argmax line repeated (E56). The
+  `[adapted]` reading was to stay until raw greedy was nearly free of repetition. REJECTED (11-06): self-play in
+  its place, the model's own continuation against the real one (E58: little effect on loops, a quarter of the
+  reading speed); loop practice's held-out cost measured at ~0.0004 (E58). REVERSED (11-09): loop practice, off
+  from the next start (`training.loop_practice_every` 0, the author's change): its held-out cost grows with the
+  reading, ~+0.004 after 147M characters, wikipedia first (E61).
+- SETTLED (11-09): the model writes by sampling, temperature 0.5, in chat and in the sample log
+  (`decoding` in config.yaml, minagi/decode.py `Sampler`). Always-greedy writing was given up as a failed bet and
+  the established rules measured against it: 0.5 wrote text as predictable to GPT-2 Large as the real
+  continuation, half greedy's repetition, no loops; greedy + DRY 8 tied it on prose and lost on chess, spelling,
+  the sample prompts and copying (E62). REVERSED: greedy as the only way of writing, with the adaptation trace as
+  its guard. The sample log writes `[written]` (by `decoding`, random numbers fixed per prompt); `[raw]` plain
+  greedy only when `samples.readings` adds it. REJECTED: typical sampling as defined (+0.25 bits on new
+  material, arithmetic falls apart), anything drawn at temperature 1, DRY on top of sampling (E62).
 
 ## Learning rate and optimiser
 
@@ -77,11 +96,16 @@ and say what is new (conventions.md). E-numbers point into experiments.md.
 - REVERSED: the exploration bonus (09-27; beta 0.35, then 0.65 by the author), replaced on 10-02
   by the balance term (E21) because reading and chat chose differently under a training-only
   bias. Use resets the prune clock.
-- SETTLED: `pool.balance` is the author's: 0.003 committed, then lowered by hand in steps to 1e-5 by 10-23
-  (timeline.md has each value; uncommitted in config.yaml; YAML reads `1e-5` as a string, train.py converts
-  it with float()).
+- SETTLED: `pool.balance` is the author's: 0.003 committed, then lowered by hand in steps to 1e-5 by 10-23,
+  raised to 2e-5 by 11-05 (timeline.md has each value; uncommitted in config.yaml; YAML reads `1e-5` as a
+  string, train.py converts it with float()). Under Muon, the router's optimizer since 10-27, it barely moves
+  the router at these weights (E52, E55).
 - SETTLED: `pool.capacity_factor: 0` (no dispatch cap), the author's (E28; uncommitted in config.yaml).
 - REJECTED: DeepSeek-style per-expert routing offsets / `pool.route_bias` (E21 at 0.001 0.7019; E35 +0.31).
+  ADOPTED (11-04, the author's go-ahead; from the next start): the same offsets under the FLOOR rule
+  (`pool.route_floor` 0.1, `route_bias` 2e-4) - only experts on trial, only upward, 0 off trial, lifted requests
+  counted lifted in the card's vote - because no newborn was admitted under Muon (E52). The router stays on Muon
+  (one optimizer family; the author dislikes mixing more). The curve rule stays rejected.
   The author was ready to switch it back on proof that it is much better; it was far worse. Usage
   follows usefulness and cannot be imposed.
 - REJECTED: mixing after gates (`pool.gate_after`, plain and scaled, E35). REJECTED before testing: log
@@ -108,10 +132,13 @@ and say what is new (conventions.md). E-numbers point into experiments.md.
 ## Data and lanes
 
 - SETTLED: a file is one document, a subject is a top-level folder.
+- CHANGED (11-10, the author's call): a visit reads one subject as one stream - files joined by
+  `<|endoftext|>` until the passage (32,768) is full - so the subject changes once a passage, as intended, keeping its
+  experts on the card. Before, a visit ended with its file and most files are shorter (E63).
 - SETTLED: reading shares are automatic (10-18; the author wanted them to set themselves, with no flag to
   turn on): worth = sum(|alpha| L)/D per lane, shares in [1/4, 3] of even, <= 5% a check. `--lane-schedule equal` and
-  `--lane-weights` exist as overrides. OPEN: the shares are of visits, not of characters, so the characters
-  each lane gets do not follow its worth (E47; not changed, the author's call).
+  `--lane-weights` exist as overrides. The shares are of characters (11-03, the author's call; they had been
+  of visits, so the characters each lane got did not follow its worth, E47).
 - SETTLED: arithmetic in standard notation, scratchpads that derive every step (09-20): a scratchpad holds
   the working that leads to the answer, not an asserted result. Its floor (E39) keeps it at the 1/32 share.
 - SETTLED: self-knowledge is a lane holding the model's own source and docs, without README

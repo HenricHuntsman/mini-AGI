@@ -71,9 +71,17 @@ try:
         r_mixed = m3.observe([body, head])
 except RuntimeError as e:
     failed = str(e)
-check("a parameter with no gradient for a step counts as zero, and the meter carries on",
-      failed is None and r_mixed is not None and 0.3 < r_mixed < 0.7,
-      failed or f"{r_mixed:.3f}")
+check("a changing active gradient set resets the meter without crashing",
+      failed is None and r_mixed is None and m3.n < 8,
+      failed or f"warmup observations: {m3.n}")
+# Greenlight intentionally starts a new window when coordinates change.
+# Once the active set stabilises it must recover a meaningful signal.
+for g in consistent[80:160]:
+    body.grad = g
+    head.grad = torch.zeros(513)
+    r_mixed = m3.observe([body, head])
+check("a stable active set recovers after conditional gradients",
+      r_mixed is not None and 0.3 < r_mixed < 0.7, str(r_mixed))
 m4 = GradSNR(beta=0.9)
 for g in consistent[:20]:
     body.grad = g

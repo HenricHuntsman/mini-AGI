@@ -53,6 +53,18 @@ class ConfigProfileTests(unittest.TestCase):
         self.assertLess(resident_state_gib, 8.0)
         self.assertLess(ram_cache_gib, 11.0)
 
+    def test_upstream_alias_and_precedence(self):
+        with patch.dict(os.environ, {"GREENLIGHT_CONFIG": "",
+                                     "MINI_AGI_CONFIG": "",
+                                     "MINAGI_CONFIG": str(PROFILE)}):
+            self.assertEqual(get(load(), "data.weights"), "greenlight-16g-r1")
+            # Explicit paths and Greenlight's existing alias retain precedence.
+            self.assertEqual(get(load(str(ROOT / "config.yaml")), "model.d_model"), 512)
+            os.environ["MINI_AGI_CONFIG"] = str(ROOT / "config.yaml")
+            self.assertEqual(get(load(), "model.d_model"), 512)
+            os.environ["GREENLIGHT_CONFIG"] = str(PROFILE)
+            self.assertEqual(get(load(), "model.d_model"), 768)
+
     def test_default_profile_remains_unchanged_without_override(self):
         with patch.dict(os.environ, {
             "GREENLIGHT_CONFIG": "", "MINI_AGI_CONFIG": ""}):

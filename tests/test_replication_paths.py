@@ -62,7 +62,7 @@ check("a directory inside the repository: relative to it",
       FP.where(inside) == "weights", FP.where(inside))
 check("...and with a trailing separator",
       FP.where(inside + os.sep) == "weights", FP.where(inside + os.sep))
-outside = os.path.join(tempfile.gettempdir(), "scratch-dir", "w")
+outside = os.path.join(os.path.dirname(ROOT), "scratch-dir", "w")
 check("a directory outside it: its name alone",
       FP.where(outside) == "w", FP.where(outside))
 check("...relative paths are resolved first, and never come back absolute",

@@ -3,6 +3,9 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import os
+import json
+import platform
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +16,7 @@ def main():
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("files", nargs="*", help="Optional test file paths")
+    parser.add_argument("--report-dir", help="Save every file log and a JSON outcome summary")
     args = parser.parse_args()
     if args.workers < 1 or args.timeout <= 0:
         parser.error("workers and timeout must be positive")
@@ -60,22 +64,46 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 '''
 
     def run(path):
+        process = subprocess.Popen(
+            [sys.executable, "-c", runner, str(path)], cwd=root, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=(os.name == "posix"))
         try:
-            result = subprocess.run(
-                [sys.executable, "-c", runner, str(path)], cwd=root, env=env,
-                capture_output=True, text=True, timeout=args.timeout)
-            return path, result.returncode, result.stdout + result.stderr
+            stdout, stderr = process.communicate(timeout=args.timeout)
+            return path, process.returncode, stdout + stderr
         except subprocess.TimeoutExpired:
-            return path, 124, f"Timed out after {args.timeout:g} seconds"
+            # A test may spawn a trainer. Killing only the test leaves that
+            # trainer running and holding the captured pipes open indefinitely.
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            stdout, stderr = process.communicate()
+            return path, 124, (stdout + stderr +
+                              f"\nTimed out after {args.timeout:g} seconds")
 
+    report = Path(args.report_dir) if args.report_dir else None
+    if report:
+        report.mkdir(parents=True, exist_ok=True)
+    records = []
     failed = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for path, code, output in pool.map(run, paths):
             print(f"{'FAIL' if code else 'PASS'} {path.name} (exit {code})", flush=True)
+            records.append({"file": str(path.relative_to(root)), "exit_code": code,
+                            "outcome": "passed" if code == 0 else "failed"})
+            if report:
+                (report / (path.name + ".log")).write_text(output, encoding="utf-8")
             if code:
                 failed += 1
                 print(output, flush=True)
     print(f"Files: {len(paths)}; passed: {len(paths) - failed}; failed: {failed}")
+    if report:
+        (report / "summary.json").write_text(json.dumps({
+            "python": platform.python_version(), "platform": platform.platform(),
+            "coverage_unit": "test file process exit; inspect logs for test skips",
+            "files": records, "passed": len(paths) - failed, "failed": failed,
+        }, indent=2) + "\n", encoding="utf-8")
     return int(failed > 0)
 
 

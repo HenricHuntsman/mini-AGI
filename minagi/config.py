@@ -2,7 +2,7 @@
 Reading the selected YAML settings file.
 
 Both model creation and training read the same settings. GREENLIGHT_CONFIG
-selects a profile; MINI_AGI_CONFIG remains a compatibility alias.
+selects a profile; MINI_AGI_CONFIG and upstream MINAGI_CONFIG remain aliases.
 """
 
 import os
@@ -18,7 +18,8 @@ def load(path=None):
     compares settings gives each arm its own (tools/ab_pool.py)."""
     import yaml
     path = (path or os.environ.get(CONFIG_ENV)
-            or os.environ.get(LEGACY_CONFIG_ENV) or DEFAULT)
+            or os.environ.get(LEGACY_CONFIG_ENV)
+            or os.environ.get("MINAGI_CONFIG") or DEFAULT)
     if not os.path.exists(path):
         return {}
     with open(path) as f:

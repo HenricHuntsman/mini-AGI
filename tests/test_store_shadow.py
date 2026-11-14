@@ -73,7 +73,6 @@ def _read_args(text, source):
         "--resident", "1",
         "--ram-capacity", "1",
         "--passage", "64",
-        "--dwell-chars", "8",
         "--grow-k", "0",
         "--held-out", "",
         "--history", "",

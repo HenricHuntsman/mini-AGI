@@ -67,6 +67,7 @@ from minagi import heldout
 from minagi import store as weights_store
 from minagi.training_policy import chars_to_steps, growth_held_due, lr_at
 from minagi.history import JsonlRecorder, append_jsonl, truncate_history
+from minagi.tokenizer import SPECIAL_ID
 
 
 def _growth_held_due(step, grow_every_steps):
@@ -463,14 +464,35 @@ class _Tracer:
               f"({len(self.ids)} chunks of real training)", flush=True)
 
 
+_EOT = SPECIAL_ID["<|endoftext|>"]       # what joins two files in a visit
+
+
+def _ends_in_eot(ids):
+    """Whether a file's ids end with <|endoftext|>, trailing whitespace
+    aside - a packed file of stories already closes its last one."""
+    k = len(ids) - 1
+    while k >= 0 and int(ids[k]) in (9, 10, 13, 32):
+        k -= 1
+    return k >= 0 and int(ids[k]) == _EOT
+
+
 class _Lane:
     """
-    One subject, sampled a window at a time.
+    One subject, sampled a passage at a time.
 
-    Each visit opens a random file and a random offset inside it, then reads
-    one context window forward from there. The window is contiguous on
-    purpose: a lone chunk carries no history, so attention would have nothing
-    to reach back over and the context window would be decoration.
+    Each visit reads `span` characters of one subject as one stream. A random
+    file, from a random offset when it is longer than the visit; when it is
+    shorter, more of the subject's files after it, each joined to the one
+    before by <|endoftext|>, until the visit is full. The stream is contiguous
+    on purpose: a lone chunk carries no history, so attention would have
+    nothing to reach back over and the context window would be decoration -
+    and the window reads across a join the way it reads across the stories
+    packed into one file.
+
+    A visit used to end with its file. Most files are shorter than a passage
+    (a wikipedia visit averaged 5.3K characters of the 32,768), so the subject
+    changed after nearly every document, and every change asks the card for
+    another subject's experts.
     """
 
     def __init__(self, name, paths, rng):
@@ -480,18 +502,25 @@ class _Lane:
 
     def open(self, model, chunk, block, device, span=None):
         """
-        Open a file for this visit.
+        Open this visit's stream.
 
         `block` is the context window; `span` is how much will be read before
         the reader moves to another subject, which may be several windows. The
-        offset has to leave room for the whole visit, not just the first
-        window, or the file runs out part way through and the visit is cut
-        short.
+        offset in a long file has to leave room for the whole visit, not just
+        the first window, or the file runs out part way through and the visit
+        is cut short.
+
+        The reader's `files` says where each file starts in the stream: [path,
+        index of its first character], the first file's at its offset. The
+        draws are a file, then an offset if that file is longer than the
+        visit, then a file at a time while the stream is short - so a visit
+        that starts in a long file draws what it always drew.
         """
         from minagi.stream import FileReader
         from minagi.ingest import as_stream
         span = max(span or block, block)
-        for _ in range(8):                       # a few tries for short files
+        parts, files, n, misses = [], [], 0, 0
+        while n < span + 1 and misses < 8:      # a few tries for bad files
             path = self.paths[int(self.rng.integers(0, len(self.paths)))]
             try:
                 data = as_stream(path)
@@ -501,16 +530,32 @@ class _Lane:
                 # source, which deletes and rewrites every file in it, and the
                 # path list was taken at startup. A vanished file is a reason
                 # to pick another one, not to end a week of reading.
+                misses += 1
                 continue
             if len(data) < 8:
+                misses += 1
                 continue
-            r = FileReader(model, data, path, chunk, block, device)
-            if len(data) > span + 1:
+            if not parts and len(data) > span + 1:
+                r = FileReader(model, data, path, chunk, block, device)
                 r.pos = int(self.rng.integers(0, len(data) - span - 1))
-            self.r = r
-            self.visits += 1
-            return r
-        return None
+                r.files = [[path, r.pos]]
+                self.r = r
+                self.visits += 1
+                return r
+            if parts and not _ends_in_eot(parts[-1]):
+                parts.append(np.array([_EOT], dtype=data.dtype))
+                n += 1
+            files.append([path, n])
+            parts.append(data)
+            n += len(data)
+        if not parts:
+            return None
+        data = np.concatenate(parts)[:span + 1]
+        r = FileReader(model, data, files[0][0], chunk, block, device)
+        r.files = files
+        self.r = r
+        self.visits += 1
+        return r
 
     def rest(self, model):
         """
@@ -637,10 +682,11 @@ def _window_gain(by_pos, ctx, chunk):
 
 
 def _visit_chunks(ctx, chunk, passage):
-    """How many chunks make up one visit to a file.
+    """How many chunks make up one visit to a subject.
 
     `passage` is in characters and says how far the reader walks through
-    one file before moving to another subject. The window slides along it
+    one subject - a file, or files joined (_Lane.open) - before moving to
+    another. The window slides along it
     a chunk at a time, so a visit is passage/chunk steps - and it must be
     at least one window, or the window never fills and the model is asked
     to read with less context than it has.
@@ -824,14 +870,6 @@ def _cmd_read(args, dry_shadow=None):
     from minagi.precision import describe
     print(f"  computing in {describe(device)}; weights stay fp32 everywhere, "
           f"Adam's moments store as bf16")
-    # dwell is configured in characters and counted in segments, one per
-    # working-set decision, which is one per chunk
-    pool.margin = args.margin
-    pool.dwell = max(1, int(args.dwell) // max(1, args.chunk))
-    print(f"  experts move only on demand: a candidate must be wanted "
-          f"{args.margin:.0%} more than the resident it displaces, and a "
-          f"newcomer holds its slot for {args.dwell:,} characters ({pool.dwell} chunks)")
-
     if args.no_pool_checkpoint:
         n_off = 0
         for _s in model.modules():
@@ -864,9 +902,7 @@ def _cmd_read(args, dry_shadow=None):
     eval_steps = max(1, int(args.eval_chunks) // max(1, args.chunk))
     sample_eval_steps = max(1, int(args.sample_eval_chunks)
                             // max(1, args.chunk))
-    ev = (FolderEvaluator(model, args.held_out, args.chunk, cfg.block, device,
-                          segment_chunks=max(1, args.segment_chunks
-                                             // max(1, args.chunk)))
+    ev = (FolderEvaluator(model, args.held_out, args.chunk, cfg.block, device)
           if args.held_out and os.path.exists(args.held_out) else None)
     before = None
     if ev is not None:
@@ -986,6 +1022,15 @@ def _cmd_read(args, dry_shadow=None):
               f"on each expert in proportion to that expert's share of recent "
               f"admissions (balance {pool.balance:g}), so the whole pool gets "
               f"used")
+    if getattr(pool, "route_bias", 0) > 0:
+        if getattr(pool, "route_floor", 0) > 0:
+            print(f"  an expert on trial that takes less than "
+                  f"{pool.route_floor:g} of an even share of choices is lifted "
+                  f"toward the characters, {pool.route_bias:g} a step, until "
+                  f"its own row earns it the share (route_floor)")
+        else:
+            print(f"  every expert's choices are steered toward its rank's "
+                  f"share, {pool.route_bias:g} a step (route_bias)")
 
     if args.no_pool_checkpoint:
         n_off = 0
@@ -1005,6 +1050,10 @@ def _cmd_read(args, dry_shadow=None):
                      kind=args.optimizer, fused=(device.type == "cuda"),
                      which=args.muon_params)
     print(f"  {muon.describe(opt)}")
+    if hasattr(pool, "keep_second_moment"):
+        # said now, before the start's held-out check reads experts into RAM:
+        # where Muon steps them, their files' second moments are never read
+        pool.keep_second_moment(muon.keeps_second(opt, pool.w1))
     snr = GradSNR()
     print(f"  trunk learns at {args.trunk_lr_mult:g}x the pool's rate "
           f"({sum(q.numel() for q in trunk)/1e6:.1f}M trunk, "
@@ -1233,12 +1282,20 @@ def _cmd_read(args, dry_shadow=None):
     fixed = _lane_weights(getattr(args, "lane_weights", ""),
                           [l.name for l in lanes])
     mode = "fixed" if fixed else getattr(args, "lane_schedule", "auto")
-    sizes = {l.name: sum(os.path.getsize(p) for p in l.paths
-                         if os.path.exists(p)) for l in lanes}
+    # what each lane holds, and what one visit to it read while a visit ended
+    # with its file: a passage, or a shorter file whole - which turns a share
+    # of visits saved back then into the share of characters it was
+    # (LaneSchedule.restore)
+    span = _visit_chunks(ctx_now, args.chunk, args.passage) * args.chunk
+    sizes, per_visit = {}, {}
+    for l in lanes:
+        got = [os.path.getsize(p) for p in l.paths if os.path.exists(p)]
+        sizes[l.name] = sum(got)
+        per_visit[l.name] = sum(min(g, span) for g in got) / max(len(got), 1)
     sched = LaneSchedule.restore(
         (man or {}).get("lanes"), [l.name for l in lanes], sizes,
         list(ev.groups) if ev is not None else [], mode=mode, weights=fixed,
-        total=float(man.get("read_chars", 0) or 0))
+        total=float(man.get("read_chars", 0) or 0), per_visit=per_visit)
     if parts is not None:
         # the level held-out is read at has just moved: fit again from the
         # log, which draws everything before on the new level
@@ -1257,10 +1314,10 @@ def _cmd_read(args, dry_shadow=None):
     print(f"  {sched.describe()}", flush=True)
     lane_of = {l.name: l for l in lanes}
     # How long a subject is read for before the next one: --passage
-    # characters of one file, and never less than a window. A window never
-    # spans two subjects - each visit reads one file, and its window ends at
-    # that file's cursor - because attention across the seam where chess
-    # becomes Python teaches nothing.
+    # characters of it, file after file, and never less than a window. A
+    # window never spans two subjects - each visit reads one subject's
+    # stream, and its window ends at that stream's cursor - because attention
+    # across the seam where chess becomes Python teaches nothing.
     def visit_chunks(ctx):
         """_visit_chunks with this run's chunk and passage."""
         return _visit_chunks(ctx, args.chunk, args.passage)
@@ -1325,7 +1382,9 @@ def _cmd_read(args, dry_shadow=None):
                                   # stream that carries it on reads them
                                   # the same way (minagi/governor.py)
                                   "checks": checks_kept,
-                                  "context_now": ctx_now})
+                                  "context_now": ctx_now,
+                                  "practice_rng": prng.bit_generator.state,
+                                  "self_play_rng": sprng.bit_generator.state})
         log_history(val)
 
     stop = False
@@ -1333,6 +1392,18 @@ def _cmd_read(args, dry_shadow=None):
     recent = collections.deque(maxlen=400)     # the training loss lately
     loss_log = (open(args.loss_log, "a", buffering=1, encoding="utf-8")
                 if getattr(args, "loss_log", None) else None)
+    # Loop practice (minagi/practice.py) draws its own random numbers, so the
+    # text read is the same with it on or off.
+    practice_every = int(getattr(args, "loop_practice_every", 0) or 0)
+    from minagi.random_state import restore_rng
+    prng = restore_rng(man.get("practice_rng"),
+                       [max(0, int(args.seed)), 7041, max(0, int(step))])
+    practiced = collections.deque(maxlen=400)
+    practiced_gn = collections.deque(maxlen=400)
+    play_every = int(getattr(args, "self_play_every", 0) or 0)
+    sprng = restore_rng(man.get("self_play_rng"),
+                        [max(0, int(args.seed)), 7042, max(0, int(step))])
+    played = collections.deque(maxlen=400)      # (term, agreeing characters)
     last_gap = None                            # held-out minus train, when known
     # How much information has been read, as against how many characters were
     # passed over: the loss IS the information content of what was read, so
@@ -1427,6 +1498,9 @@ def _cmd_read(args, dry_shadow=None):
             r = lane.open(model, args.chunk, ctx_now, device,
                           turn * args.chunk)
             if r is None:
+                # nothing to read there: charged as a full visit, so the
+                # schedule moves on rather than picking it again
+                sched.missed(lane.name, turn * args.chunk)
                 continue
             path, data = r.name, r.data
             fl = []
@@ -1495,14 +1569,48 @@ def _cmd_read(args, dry_shadow=None):
                     # loss trained on, and the model's own part of it - the
                     # number held-out reads, without the router's terms
                     ml = getattr(r, "model_loss", None)
+                    row = {"step": step, "lane": lane.name, "file": path,
+                           "pos": getattr(r, "pos", None), "j": j,
+                           "loss": round(float(loss.detach()), 6),
+                           "model": (round(float(ml), 6) if ml is not None
+                                     else None),
+                           "t": round(time.time(), 2)}
+                    # a visit of several files: where each starts in the
+                    # stream `pos` counts in, once, so the text can be put
+                    # back together
+                    files = getattr(r, "files", None) or []
+                    if j == 0 and len(files) > 1:
+                        row["files"] = files
                     loss_log.write(json.dumps(
-                        {"step": step, "lane": lane.name, "file": path,
-                         "pos": getattr(r, "pos", None), "j": j,
-                         "loss": round(float(loss.detach()), 6),
-                         "model": (round(float(ml), 6) if ml is not None
-                                   else None),
-                         "t": round(time.time(), 2)},
-                        separators=(",", ":")) + "\n")
+                        row, separators=(",", ":")) + "\n")
+                if practice_every and (step + 1) % practice_every == 0:
+                    # One more step, on a real span of this window written
+                    # out again. Nothing is read, so the cursor, the
+                    # characters counted, the loss log and the clocks stay
+                    # where the reading left them.
+                    opt.zero_grad(set_to_none=True)
+                    pl = r.practice(args.loop_practice_lambda,
+                                    args.loop_practice_reps, prng)
+                    if pl is not None:
+                        pl.backward()
+                        practiced_gn.append(float(
+                            torch.nn.utils.clip_grad_norm_(
+                                model.parameters(), args.clip)))
+                        opt.step()
+                        practiced.append(float(pl))
+                if play_every and (step + 1) % play_every == 0:
+                    # One more step: the model writes on from a place in
+                    # this window, and learns the real continuation up and
+                    # its own down. Nothing is read, as with practice.
+                    opt.zero_grad(set_to_none=True)
+                    sp = r.self_play(args.self_play_chars, sprng,
+                                     args.self_play_sample)
+                    if sp is not None:
+                        sp.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                       args.clip)
+                        opt.step()
+                        played.append((float(sp), r.played["agree"]))
                 by_pos[j].append(float(loss.detach()))
                 seen += args.chunk
                 nats += float(loss.detach()) * args.chunk
@@ -1577,11 +1685,14 @@ def _cmd_read(args, dry_shadow=None):
                                   level=(float(np.mean(list(level.values())))
                                          if level and v_ is not None
                                          else None),
-                                  logits=logits)
+                                  logits=logits, rule=_rule(args))
                     rp = pool.report()
                     print(f"    samples -> {args.sample_log}"
                           + (f"  train {float(np.mean(recent)):.4f}"
                              if recent else "")
+                          + (f"  loop practice {float(np.mean(practiced)):.4f}"
+                             f" (grad {float(np.mean(practiced_gn)):.2f})"
+                             if practiced else "")
                           + (f"  held-out {v_:.4f}" if v_ is not None else "")
                           + (f"  logit {max(logits.values()):.1f}"
                              if logits else "")
@@ -1732,6 +1843,16 @@ def _cmd_read(args, dry_shadow=None):
           f"checks and samples included)")
     if losses:
         print(f"  mean loss over the files: {np.mean(losses):.4f}")
+    if played:
+        print(f"  self-play: last {len(played)} steps' term "
+              f"{np.mean([p for p, _ in played]):.4f}, its own continuation "
+              f"agreeing with the real one at "
+              f"{np.mean([a for _, a in played]):.1f} of "
+              f"{args.self_play_chars} characters")
+    if practiced:
+        print(f"  loop practice: last {len(practiced)} steps' term "
+              f"{np.mean(practiced):.4f}, gradient norm "
+              f"{np.mean(practiced_gn):.2f} against a clip of {args.clip:g}")
 
     if ev is not None:
         v = ev.run(eval_steps, spread=True); se = v.pop("stderr", 0.0)
@@ -1759,7 +1880,7 @@ def _cmd_read(args, dry_shadow=None):
                       opt.param_groups[-1]["lr"], info["characters"],
                       ctx_now, ctx_max, context_gain(), read_rate,
                       float(np.mean(grads)) if grads else None, args.clip,
-                      write_rate=write_rate)
+                      write_rate=write_rate, rule=_rule(args))
         print(f"  final samples in {args.sample_log}")
 
     if args.save:
@@ -1782,7 +1903,9 @@ def _cmd_read(args, dry_shadow=None):
                                   # stream that carries it on reads them
                                   # the same way (minagi/governor.py)
                                   "checks": checks_kept,
-                                  "context_now": ctx_now})
+                                  "context_now": ctx_now,
+                                  "practice_rng": prng.bit_generator.state,
+                                  "self_play_rng": sprng.bit_generator.state})
         print(f"  weights/ updated - the model has read this and kept it")
     else:
         print(f"  not saved (pass --save to keep what it learned)")
@@ -1827,24 +1950,40 @@ SAMPLE_PROMPTS = [
 cmd_read.__wrapped__ = _cmd_read
 
 
-@torch.no_grad()
+SAMPLE_READINGS = ("written", "raw")
+
+
+def _readings(v):
+    """--sample-readings, or samples.readings in config.yaml: a list, or
+    names separated by commas, each one of SAMPLE_READINGS."""
+    names = [r.strip() for r in (v.split(",") if isinstance(v, str) else v)
+             if str(r).strip()]
+    bad = [r for r in names if r not in SAMPLE_READINGS]
+    if bad or not names:
+        raise argparse.ArgumentTypeError(
+            f"sample readings {names}: each one of {', '.join(SAMPLE_READINGS)}")
+    return names
+
+
 def _sample_variants(args):
     """
-    Which readings of each prompt to write down.
+    Which readings of each prompt to write down, each a label and the
+    Sampler settings (minagi/decode.py) it is written with:
 
-    RAW first, always. It is the only one that says what the model predicts,
-    and it is the one whose repeat rate is a fact about the model rather than
-    about the decoding rule.
-
-    --sample-raw-only drops the guarded reading, for when the raw text is good
-    enough that the guard is no longer telling you anything.
+      written  as chat writes: config.yaml's `decoding`, as it was when the
+               run started
+      raw      plain greedy, no rule of any kind - the argmax trajectory, and
+               the one whose repeat rate is a fact about the model rather
+               than about a rule
     """
-    v = [("raw", dict(rep_penalty=1.0, adapt_strength=0.0))]
-    if not getattr(args, "sample_raw_only", False):
-        v.append(("adapted", dict(rep_penalty=args.rep_penalty,
-                                  adapt_strength=args.adapt_strength,
-                                  adapt_decay=args.adapt_decay)))
-    return v
+    rules = {"written": dict(args.decoding), "raw": {}}
+    return [(r, rules[r]) for r in args.sample_readings]
+
+
+def _rule(args):
+    """How the `written` reading is written, in a line for the log."""
+    from minagi.decode import Sampler
+    return Sampler(**args.decoding).describe()
 
 
 def repeat_rate(s, n=8):
@@ -1925,42 +2064,25 @@ def sample_now(model, tok, device, n_new=140, variants=None):
     """
     What the model says right now, on one prompt from each domain.
 
-    TWO readings of every prompt, because neither alone is honest:
+    Each reading (_sample_variants: a label and its Sampler settings) is
+    written by a Sampler whose random numbers are fixed by the prompt, so a
+    prompt draws the same numbers at every check and two checks differ by the
+    model, not by their luck. A greedy reading draws none.
 
-      raw       plain greedy, no guard of any kind. This is what the model
-                actually predicts - the true argmax trajectory - and the only
-                text here that can be reasoned from about the MODEL.
-      adapted   the same, with the adaptation trace holding off loops. Easier
-                to read, and partly written by the decoding rule: instrumented
-                character by character, adaptation overruled the model on 28 of
-                72 choices, so more than a third of that text is the guard
-                talking rather than the model.
-
-    Where the two agree, the guard is doing nothing and the model stands on its
-    own. Where they diverge is exactly where it is falling into a hole - a
-    signal that was invisible while only the guarded text was kept.
-
-    Nothing draws a random number, and not for reproducibility: CUDA does not
-    give that anyway. Temperature would make the text look better by rolling
-    dice against the model's own prediction, which is a different thing from
-    the model being right. The repeat rate on the RAW reading is the number to
-    drive down, and only a better model can drive it.
-
-    Each variant starts at position 0, so the second reads the prompt exactly
+    Each reading starts at position 0, so the second reads the prompt exactly
     as the first did, and each character of either reply admits the experts
     it asks for.
     """
-    from minagi.decode import pick_next
+    from minagi.decode import Sampler
     if variants is None:
-        variants = [("raw", dict(rep_penalty=1.0, adapt_strength=0.0)),
-                    ("adapted", dict(rep_penalty=1.0, adapt_strength=2.5,
-                                     adapt_decay=0.88))]
+        variants = [("raw", {})]
     was_training = model.training
     model.eval()
     out = []
-    for name, prompt in SAMPLE_PROMPTS:
+    for k, (name, prompt) in enumerate(SAMPLE_PROMPTS):
         texts = []
         for label, kw in variants:
+            pick = Sampler(seed=k, **kw)
             ids = list(tok.encode(prompt).ids)[-model.cfg.block:]
             cur = torch.tensor([ids], device=device)
             caches = model.empty_caches()
@@ -1980,12 +2102,9 @@ def sample_now(model, tok, device, n_new=140, variants=None):
                 with torch.no_grad():
                     logits, _ = model(cur, caches=caches, pos_offset=off)
                 off += cur.shape[1]
-                nxt = pick_next(logits[:, -1, :].float(),
-                                torch.tensor([ids + got], device=device),
-                                temperature=0.0, **kw)
-                t = int(nxt[0, 0])
+                t = pick(logits[0, -1], ids + got)
                 got.append(t)
-                cur = nxt
+                cur = torch.tensor([[t]], device=device)
             texts.append((label, tok.decode(got)))
             del caches
         out.append((name, prompt, texts))
@@ -2087,7 +2206,7 @@ def write_samples(path, step, chars, minutes, samples, val=None, se=None,
                   per_domain=None, experts=None, train=None, lr=None,
                   corpus=None, context=None, ceiling=None, gain=None,
                   rate=None, gnorm=None, clip=None, plast=None,
-                  write_rate=None, level=None, logits=None):
+                  write_rate=None, level=None, logits=None, rule=None):
     with open(path, "a", encoding="utf-8", errors="replace") as f:
         f.write(f"\n{'=' * 78}\n")
         # How much has been read, against how much there is. A bare count of
@@ -2191,6 +2310,15 @@ def write_samples(path, step, chars, minutes, samples, val=None, se=None,
         if raw:
             f.write(f"repeats {sum(repeat_rate(t) for t in raw)/len(raw):.0%} "
                     f"of 8-grams, greedy with no guard\n")
+        # The same for the `written` reading, which is the rule's as much as
+        # the model's - so its own line, saying the rule, and not the line
+        # above, whose history is greedy's alone.
+        written = [t for _, _, ts in samples if not isinstance(ts, str)
+                   for lab, t in ts if lab == "written"]
+        if written:
+            f.write(f"written {rule or 'as chat writes'}: repeats "
+                    f"{sum(repeat_rate(t) for t in written)/len(written):.0%}"
+                    f" of 8-grams\n")
         f.write(f"{'=' * 78}\n")
         for name, prompt, texts in samples:
             f.write(f"\n--- {name} ---\n")
@@ -2286,6 +2414,9 @@ def build_paged(wdir, device, resident=None, ram_capacity=256, ceiling=None,
             raise FileNotFoundError(
                 f"checkpoint is missing expert files: {missing[:8]}")
     cfgd = dict(man["cfg"])
+    # Validate the effective checkpoint shape, not a stale growth ceiling.
+    cfgd["pool_max"] = _router_width(wdir, man)
+    cfgd["pool_experts"] = int(man["n_experts"])
     resident = resident or cfgd.get("pool_resident") or cfgd["pool_top_k"]
     cfg = RecurConfig(**{k: v for k, v in cfgd.items()
                          if k in RecurConfig.__dataclass_fields__})
@@ -2359,6 +2490,7 @@ def build_paged(wdir, device, resident=None, ram_capacity=256, ceiling=None,
         pool.route_bias = float(_get_cfg(_c, "pool.route_bias", 0.0) or 0.0)
         pool.route_bias_offset = float(
             _get_cfg(_c, "pool.route_bias_offset", 25.0) or 25.0)
+        pool.route_floor = float(_get_cfg(_c, "pool.route_floor", 0.0) or 0.0)
         pool.birth_gate_parents = float(
             _get_cfg(_c, "growth.birth_gate_parents", 0.0) or 0.0)
     except Exception:
@@ -2427,6 +2559,29 @@ def main():
                     default=_cfg(_c, "training.weight_decay", 0.1))
     rd.add_argument("--clip", type=float,
                     default=_cfg(_c, "training.clip", 1.0))
+    rd.add_argument("--loop-practice-every", type=int,
+                    default=_cfg(_c, "training.loop_practice_every", 0),
+                    help="after every this many steps, one more on a loop-"
+                         "practice window (minagi/practice.py); 0 is off")
+    rd.add_argument("--loop-practice-lambda", type=float,
+                    default=_cfg(_c, "training.loop_practice_lambda", 0.5),
+                    help="each copy of a practised span at most this times "
+                         "as likely as the one before")
+    rd.add_argument("--loop-practice-reps", type=int,
+                    default=_cfg(_c, "training.loop_practice_reps", 6),
+                    help="copies of the span in a practice window")
+    rd.add_argument("--self-play-every", type=int,
+                    default=_cfg(_c, "training.self_play_every", 0),
+                    help="after every this many steps, one more on the "
+                         "model's own continuation against the real one "
+                         "(minagi/practice.py); 0 is off")
+    rd.add_argument("--self-play-chars", type=int,
+                    default=_cfg(_c, "training.self_play_chars", 64),
+                    help="characters the model writes for a self-play step")
+    rd.add_argument("--self-play-sample", action="store_true",
+                    default=bool(_cfg(_c, "training.self_play_sample", False)),
+                    help="draw the model's continuation from its "
+                         "distribution instead of writing it greedily")
     rd.add_argument("--seed", type=int, default=0)
     rd.add_argument("--save", action="store_true",
                     help="keep what it learned; without this the run is a dry "
@@ -2453,7 +2608,9 @@ def main():
     rd.add_argument("--sample-every", type=float, default=0,
                     help="minutes between writing sample generations")
     rd.add_argument("--sample-log", default="runs/samples.txt")
-    rd.add_argument("--sample-chars", type=int, default=140)
+    rd.add_argument("--sample-chars", type=int,
+                    default=int(_cfg(_c, "samples.chars", 140)),
+                    help="characters written after each sample prompt")
     rd.add_argument("--save-every", type=float,
                     default=_cfg(_c, "training.save_every", 5),
                     help="minutes between checkpoints; 0 to save only at the "
@@ -2483,9 +2640,10 @@ def main():
                     help="experts held in VRAM; the rest stay on disk")
     rd.add_argument("--passage", type=int,
                     default=_cfg(_c, "data.passage", 65536),
-                    help="contiguous characters read from one file before "
-                         "moving to another subject; the window slides along "
-                         "it a chunk at a time. Distinct from model.context_end, "
+                    help="contiguous characters read from one subject - a "
+                         "file, or files joined by <|endoftext|> - before "
+                         "moving to another; the window slides along it a "
+                         "chunk at a time. Distinct from model.context_end, "
                          "which is how far the model sees and how far the "
                          "gradient reaches")
     rd.add_argument("--lane-schedule", choices=("auto", "equal"),
@@ -2533,22 +2691,6 @@ def main():
                     help="append one line per checkpoint recording every "
                          "expert's gate, usage and admissions, so a long run "
                          "can be analysed afterwards; empty to disable")
-    rd.add_argument("--margin", type=float,
-                    default=_cfg(_c, "pool.margin", 0.10),
-                    help="how much more a candidate must be wanted before it "
-                         "displaces a resident expert")
-    # `--dwell` is a strict prefix of `--dwell-chars`, and argparse matches
-    # unambiguous prefixes - so the old spelling would be accepted silently and
-    # read as characters. An alias that keeps the name and changes the unit is
-    # the exact failure this whole change exists to remove, so it is rejected
-    # explicitly rather than left to be discovered.
-    rd.add_argument("--dwell", dest="dwell_retired", type=int, default=None,
-                    help=argparse.SUPPRESS)
-    rd.add_argument("--dwell-chars", dest="dwell", type=int,
-                    default=_cfg(_c, "pool.dwell_chars",
-                                 _cfg(_c, "pool.dwell", 4) * 512),
-                    help="CHARACTERS a newly admitted expert is safe from being "
-                         "displaced again")
     rd.add_argument("--ram-capacity", type=int,
                     default=_cfg(_c, "pool.ram_cache", 128),
                     help="experts kept in system memory; when full the one "
@@ -2604,15 +2746,15 @@ def main():
                     default=_cfg(_c, "growth.max_disk_gb", 16.0),
                     help="the pool may not grow past this many GB of expert "
                          "files; 0 means no limit")
-    rd.add_argument("--adapt-strength", type=float,
-                    default=_cfg(_c, "decoding.adapt_strength", 2.5),
-                    help="logits of suppression for a character just used; "
-                         "0 disables the adaptation trace")
-    rd.add_argument("--adapt-decay", type=float,
-                    default=_cfg(_c, "decoding.adapt_decay", 0.88))
-    rd.add_argument("--rep-penalty", type=float,
-                    default=_cfg(_c, "decoding.rep_penalty", 1.0),
-                    help="the older, weaker loop guard; off by default")
+    # How the sample log's `written` reading chooses its characters - the
+    # same settings chat writes with - checked here, so a name in the file
+    # that is no setting stops the run at its start rather than at its first
+    # sample.
+    from minagi.decode import settings_from as _decoding
+    try:
+        rd.set_defaults(decoding=_decoding(_c))
+    except ValueError as e:
+        raise SystemExit(str(e))
     rd.add_argument("--plots", dest="plots", action="store_true",
                     default=_cfg(_c, "plots.enabled", True),
                     help="redraw runs/training_progress.png every time the "
@@ -2628,9 +2770,13 @@ def main():
                          "the run has got to. A TRAILING span, not a fixed "
                          "start: `since 40` was set at 60M read and by 189M "
                          "it was showing the whole history again")
-    rd.add_argument("--sample-raw-only", action="store_true",
-                    help="write only the unguarded greedy reading of each "
-                         "prompt, not the adapted one as well")
+    rd.add_argument("--sample-readings", type=_readings,
+                    default=_readings(_cfg(_c, "samples.readings",
+                                           ["written"])),
+                    help="the readings of each sample prompt to write, "
+                         "separated by commas: written, as chat writes "
+                         "(config.yaml's decoding), and raw, plain greedy "
+                         "(samples.readings in config.yaml)")
     rd.add_argument("--lr-reset", action="store_true",
                     help="restore the full learning rate by hand. The "
                          "plasticity controller does this on its own when "
@@ -2692,10 +2838,6 @@ def main():
                          "brake's idle line so additions have to earn their way")
     rd.add_argument("--grow-keep-ratio", type=float,
                     default=_cfg(_c, "growth.keep_ratio_min", 0.35))
-    rd.add_argument("--segment-chars", dest="segment_chunks", type=int,
-                    default=_cfg(_c, "pool.segment_chars",
-                                 _cfg(_c, "pool.segment_chunks", 16) * 512),
-                    help="CHARACTERS one working set covers")
     rd.add_argument("--trunk-lr-mult", type=float,
                     default=_cfg(_c, "training.trunk_lr_mult", 0.3),
                     help="the trunk is shared by every domain and is where "

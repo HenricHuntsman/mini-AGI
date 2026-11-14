@@ -34,6 +34,13 @@ class CommandLineContractTests(unittest.TestCase):
         defined = set(re.findall(r'add_argument\(\s*"--([a-z0-9-]+)"', src))
         defined |= set(re.findall(r'dest="([a-z_0-9]+)"', src))
         defined = {d.replace("-", "_") for d in defined}
+        # Config-derived fields are assigned after parsing rather than exposed as flags.
+        defined |= set(re.findall(r"\bargs\.([a-z_][a-z_0-9]*)\s*=(?!=)", src))
+        import ast
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "set_defaults"):
+                defined.update(k.arg for k in node.keywords if k.arg)
         used = set(re.findall(r"\bargs\.([a-z_][a-z_0-9]*)", src))
         # `paths` is the positional, not an option
         self.assertEqual(used - defined - {"paths"}, set(),
