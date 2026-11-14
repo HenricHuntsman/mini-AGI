@@ -1,5 +1,7 @@
 # Greenlight Recur
 
+
+> **14 November integration candidate:** [PR #55](https://github.com/HenricHuntsman/mini-AGI/pull/55) updates the optimizer, sampling and restart safeguards. See the [changes, validation scope and remaining gates](docs/UPSTREAM-INTEGRATION-2026-11-14.md). This is a draft, not a production or performance-qualified release.
 > **Greenlight R5 — active reliability hardening**
 >
 > Greenlight Recur is validating the complete continual-training lifecycle: train → checkpoint → terminate → rebuild model and optimiser → reload → resume → evaluate/generate. The R5 checkpoint/restart reliability gate was merged into `main` in [PR #30](https://github.com/HenricHuntsman/mini-AGI/pull/30) (commit [`f5f823d`](https://github.com/HenricHuntsman/mini-AGI/commit/f5f823d83d153dd49cd59b53b1bdfbc491e684dd)). Normal AdamW reload and paged expert/optimiser restart regressions are included. Hardware-specific resume and long-running continual-training claims still require reproducible validation.

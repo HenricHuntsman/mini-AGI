@@ -1,0 +1,587 @@
+{
+  "python": "3.12.14",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "coverage_unit": "test file process exit; inspect logs for test skips",
+  "files": [
+    {
+      "file": "tests/test_adamw_orphan_steps.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_adaptation.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_agent_corpus.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_arc_corpus.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_attention_logit.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_balance_report_gate.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_balance_term.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_benchmark.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_birth_recombination.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_blocked_attention.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_checkpoint_reload_resume.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_clean_eviction.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_command_contract.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_companion_api.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_config_profile.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_context_growth.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_context_ramp.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_corpora_build.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_corpora_contract.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_corpora_enwik9.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_cpu_bf16.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_device_default.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_dispatch_capacity.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_dispatch_exact.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_draw_layers.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_drop_quietest.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_dropped_report.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_enwik9_adapt.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_enwik9_scaling.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_enwik9_table.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_eval_pg19.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_expert_selection.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_fast_inference.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_fetch_cache.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_governor.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_grad_snr.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_gradsnr_regression.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_greenlight_cli.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_greenlight_lab.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_growth_gap.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_growth_instant.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_growth_trial.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_halt_freeze.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_heldout_level.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_history.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_history_resume.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_ingest.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_lane_characters.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_lane_schedule.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_lane_weights.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_lanes.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_live_learning.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_local_agent.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_loop_practice.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_model_evaluate.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_model_stress.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_moment_storage.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_muon.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_muon_one_moment.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_newborn_staleness.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_norm_memory.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_notify.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_npz_reader.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_optim.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_optim_restore.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_optimizer_resume.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_own_moments.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_paged_auditions.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_paged_layout_detection.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_param_count.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_pg19_table.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_plasticity.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_plot_hook.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_ponder_probe.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_pool_api.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_pool_switches.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_practice_resume.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_prune.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_prune_atrophy.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_prune_backward.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_prune_identity.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_publish_benchmarks.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_read_only_paged.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_replication_paths.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_restart_state.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_resume_reading.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_router_width.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_runner.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_sample_coverage.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_sample_readings.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_sample_routing.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_sampler.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_save_roundtrip.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_select_temperature.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_self_knowledge.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_self_play.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_serve.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_serve_context.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_serve_window.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_store_shadow.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_stream_evaluation.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_train_depth.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_training_cli.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_training_doctor.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_training_policy.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_units.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_upstream_balance_ab.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_verify_model.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_visit_length.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_visit_stream.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_window_ceiling.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_window_gradients.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_windows_runtime.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_write_behind.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    },
+    {
+      "file": "tests/test_xpu_precision.py",
+      "exit_code": 0,
+      "outcome": "passed"
+    }
+  ],
+  "passed": 115,
+  "failed": 0,
+  "source_commit": "bcb8cd6e6894b77c85f342edd7fb9c2cac259190",
+  "date": "2026-11-14",
+  "scope": "ChatGPT execution environment; CPU synthetic fixtures; not user production checkpoint"
+}
