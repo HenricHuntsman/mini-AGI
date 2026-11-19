@@ -99,6 +99,9 @@ try:
         read(t)
     left = [e for e in trained if e not in pool.slots]
     held = {e: pool.tiers.fetch(pool._f(e))["w1"] for e in left}
+    # fetch() may return pending weights before the writer counts the disk write.
+    # Wait for queued evictions only; flushing here would create extra writes.
+    pool.tiers.drain()
     check("trained experts left the card", len(left) > 0, f"{left}")
     check("...and each was written back with its trained weights",
           all(torch.allclose(held[e], trained[e]) for e in left)
