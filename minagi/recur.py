@@ -490,13 +490,17 @@ class RecurCoder(nn.Module):
 
     def generate(self, idx, max_new_tokens, temperature=0.0, top_k=0,
                  top_p=1.0, collect=False, rep_penalty=1.0,
-                 no_repeat_ngram=0, adapt_strength=2.5, adapt_decay=0.88):
+                 no_repeat_ngram=0, adapt_strength=2.5, adapt_decay=0.88,
+                 sampler=None):
         # The prompt's forward admits the experts its characters ask for most,
         # and then every character of the reply is a forward of its own that
         # adds its requests to the vote and routes among what the prompt and
         # the reply so far have voted for. When the attention window fills,
         # the context is re-read from position 0 - a new text, whose vote is
         # the re-read context's.
+        #
+        # `sampler`, a minagi.decode.Sampler, chooses each character in place
+        # of the settings before it - one stream, so one row of `idx`.
         self.eval()
         cfg = self.cfg
         caches = self.empty_caches()
@@ -514,10 +518,14 @@ class RecurCoder(nn.Module):
             offset += cur.shape[1]
             if collect and extra is not None:
                 steps_log.append(float(extra["steps"][0, -1]))
-            nxt = pick_next(logits[:, -1, :].float(), out, temperature, top_k,
-                            top_p, rep_penalty, no_repeat_ngram,
-                            adapt_strength=adapt_strength,
-                            adapt_decay=adapt_decay)
+            if sampler is not None:
+                nxt = torch.tensor([[sampler(logits[0, -1], out[0].tolist())]],
+                                   device=out.device)
+            else:
+                nxt = pick_next(logits[:, -1, :].float(), out, temperature,
+                                top_k, top_p, rep_penalty, no_repeat_ngram,
+                                adapt_strength=adapt_strength,
+                                adapt_decay=adapt_decay)
             out = torch.cat([out, nxt], dim=1)
             cur = nxt
         return (out, steps_log) if collect else out
@@ -528,8 +536,8 @@ def load_recur(path, device, read_only=False):
     Load a model from the weights directory, or from a .pt checkpoint.
 
     The directory is the model, so `weights` is the normal thing to pass. A
-    .pt path still works because the film's captures and older invocations use
-    one, and there is no reason to break them.
+    .pt path still works because older checkpoints and invocations use one,
+    and there is no reason to break them.
     """
     import os
     if os.path.isdir(path) and os.path.exists(os.path.join(path, "manifest.json")):
@@ -619,8 +627,8 @@ def _load_dir(path, device, paged=None, read_only=False):
         paged = bool(man.get("paged")) or os.path.isdir(
             os.path.join(path, "experts"))
     if paged:
-        # build_paged lives in train.py; a caller in another directory (the
-        # film's captures run from video/) needs the repo root on the path
+        # build_paged lives in train.py; a caller run from another directory
+        # needs the repo root on the path
         _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if _root not in sys.path:
             sys.path.insert(0, _root)

@@ -33,9 +33,12 @@ import os
 import sys
 import tempfile
 
+import time
+
 import numpy as np
 import torch
 
+from .muon import second_moment
 from .precision import pack_bf16, unpack_bf16
 
 CORE, ROUTERS, EXPERTS, OPTIM = "core", "routers", "experts", "optim"
@@ -75,6 +78,26 @@ class WeightShadow:
 def shadow(path):
     """Return temporary storage for a dry read of a weights directory."""
     return WeightShadow(path)
+
+def _replace(tmp, dst, attempts=8 if os.name == "nt" else 1):
+    """
+    os.replace, which is what makes a save atomic, retried on Windows.
+
+    Windows refuses to replace a file another process has open without delete
+    sharing - a plotter reading manifest.json at that moment is enough - and
+    such a reader lets go within milliseconds. So a PermissionError there is
+    tried again, waiting 0.05 s and doubling, 6.35 s in all over 8 attempts,
+    then raised; any other error is raised at once. Elsewhere a rename is
+    never blocked by a reader, and one attempt is all there is.
+    """
+    for i in range(attempts):
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05 * 2 ** i)
 
 
 def _is_expert(key):
@@ -178,10 +201,11 @@ def save(model, path, step=None, val=None, opt=None, cfg=None, verbose=False,
         "experts": entries, "total_bytes": int(total),
         "removed_expert_files": removed,
     }
+    manifest.update(extra or {})
     tmp = os.path.join(path, "manifest.json.tmp")
     with open(tmp, "w") as f:
         json.dump(manifest, f, indent=1)
-    os.replace(tmp, os.path.join(path, "manifest.json"))
+    _replace(tmp, os.path.join(path, "manifest.json"))
     if verbose:
         n_files = len(entries) + 3
         print(f"  weights/: {len(entries)} experts + 3 bundles = {n_files} files, "
@@ -191,7 +215,8 @@ def save(model, path, step=None, val=None, opt=None, cfg=None, verbose=False,
 
 
 def _expert_moments(opt, model):
-    """Adam's two moments per expert, keyed by expert id."""
+    """The optimiser's moments per expert, keyed by expert id: AdamW's two,
+    Muon's one."""
     name_of = {id(p): n for n, p in model.named_parameters()}
     out = {}
     for group in opt.param_groups:
@@ -204,7 +229,8 @@ def _expert_moments(opt, model):
                 continue
             i, leaf = expert_index(n), expert_leaf(n)
             out.setdefault(i, {})[leaf + "_m"] = st["exp_avg"].cpu().numpy()
-            out[i][leaf + "_v"] = st["exp_avg_sq"].cpu().numpy()
+            if "exp_avg_sq" in st:
+                out[i][leaf + "_v"] = st["exp_avg_sq"].cpu().numpy()
     return out
 
 
@@ -302,7 +328,7 @@ def _save_paged(model, pool, path, step, val, opt, cfg, verbose, extra=None):
     tmp = os.path.join(path, "manifest.json.tmp")
     with open(tmp, "w") as f:
         json.dump(manifest, f, indent=1)
-    os.replace(tmp, os.path.join(path, "manifest.json"))
+    _replace(tmp, os.path.join(path, "manifest.json"))
     if verbose:
         print(f"  weights/: {len(entries)} experts + 3 bundles, "
               f"{total/1e6:.1f} MB (paged - experts were already on disk)")
@@ -313,13 +339,13 @@ def _savez(path, arrays):
     """Atomic bundle write."""
     tmp = path + ".tmp.npz"
     np.savez(tmp, **arrays)
-    os.replace(tmp, path)
+    _replace(tmp, path)
     return sum(a.nbytes for a in arrays.values())
 
 
 def _save_optim(opt, model, path):
     """
-    Adam moments for everything that is not an expert.
+    The optimiser's moments for everything that is not an expert.
 
     Expert moments live in the expert's own file, next to its weights, because
     that is where they belong - an expert is not fully described by its weights
@@ -338,7 +364,8 @@ def _save_optim(opt, model, path):
             # bf16: two thirds of this file is moments, and narrowing them
             # costs a thousandth of their magnitude. See minagi/precision.py.
             out[n + "|m"] = pack_bf16(st["exp_avg"].detach().cpu())
-            out[n + "|v"] = pack_bf16(st["exp_avg_sq"].detach().cpu())
+            if "exp_avg_sq" in st:
+                out[n + "|v"] = pack_bf16(st["exp_avg_sq"].detach().cpu())
             if st.get("step") is not None:
                 out[n + "|t"] = np.asarray(float(st["step"]))
     return _savez(os.path.join(path, "optim.npz"), out) if out else 0
@@ -417,15 +444,15 @@ def _load_optim(opt, model, path):
             if n is None or (n + "|m") not in z.files:
                 continue
             m = unpack_bf16(z[n + "|m"])
-            v = unpack_bf16(z[n + "|v"])
+            v = unpack_bf16(z[n + "|v"]) if (n + "|v") in z.files else None
             # a tensor that changed shape since the moments were written - the
             # embedding after a vocabulary extension, an expert after growth -
             # has to start with fresh moments rather than mismatched ones
-            if m.shape != p.shape or v.shape != p.shape:
+            if m.shape != p.shape or (v is not None and v.shape != p.shape):
                 continue
             st = opt.state[p]
             st["exp_avg"] = m.to(device=p.device, dtype=p.dtype)
-            st["exp_avg_sq"] = v.to(device=p.device, dtype=p.dtype)
+            _second(st, v, group, p)
             if (n + "|t") in z.files:
                 # fused AdamW requires the step counter on the same device as
                 # the parameter, not on the CPU where it was just loaded
@@ -488,12 +515,24 @@ def _load_expert_moments(opt, model, path):
             if z is None or (leaf + "_m") not in z.files:
                 continue
             m = unpack_bf16(z[leaf + "_m"])
-            v = unpack_bf16(z[leaf + "_v"])
+            v = unpack_bf16(z[leaf + "_v"]) if (leaf + "_v") in z.files else None
             if m.shape != p.shape:
                 continue
             st = opt.state[p]
             st["exp_avg"] = m.to(device=p.device, dtype=p.dtype)
-            st["exp_avg_sq"] = v.to(device=p.device, dtype=p.dtype)
+            _second(st, v, group, p)
+
+
+def _second(st, v, group, p):
+    """A restored tensor's second moment: none where Muon steps it, which
+    keeps only a momentum; the saved one where AdamW does - or, saved while
+    Muon stepped it, one started from its momentum (minagi/muon.py)."""
+    if group.get("muon"):
+        st.pop("exp_avg_sq", None)
+    elif v is not None:
+        st["exp_avg_sq"] = v.to(device=p.device, dtype=p.dtype)
+    else:
+        st["exp_avg_sq"] = second_moment(st["exp_avg"])
 
 
 def summarise(path):
@@ -614,15 +653,13 @@ def best_val(path):
     """
     Validation loss of the state on disk, or inf if there is none.
 
-    The directory holds the best state the model has reached, not the most
-    recent one: `save` is called only when a run improves on it. A second copy
-    kept aside as a snapshot would double a figure that is already 236 MB and
-    grows with the pool, and it would be a copy of exactly what is already
-    here.
-
-    That makes the directory the thing to fall back to. A run that diverges
-    reloads it and carries on, which costs the steps since the last
-    improvement and nothing more.
+    What that state is depends on who wrote it. `train.py stream` saves only
+    when a run improves on it, so there the directory holds the best state and
+    is what a diverging run falls back to. `train.py read` saves its latest
+    state at every held-out check, with that check's loss, and every few
+    minutes and at its end with none - so after a read the directory is where
+    the model last stood, and this is inf whenever the last save came between
+    checks.
     """
     f = os.path.join(path, "manifest.json")
     if not os.path.exists(f):

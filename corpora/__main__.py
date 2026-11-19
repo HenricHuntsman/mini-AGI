@@ -5,10 +5,13 @@
     fetch        any Hugging Face dataset, by name
     reasoning    OpenThoughts deliberation traces
     pg19         the PG19 test split, for a comparable bits-per-byte
+    enwik9       the 50 MB enwik9 slice the README's enwik9 table is scored on
+    agent        the next stage's tool-use lanes (--check shows the plan)
 
     code         Python from the local filesystem   -> data_char
     arithmetic   synthesised, with scratchpads      -> data_math_char
     chat         primal chat and self-knowledge     -> data_chat_char
+    self-knowledge  separate local chat lane        -> data_self_chat_char
     chess        Lichess games in algebraic         -> data_chess_char
 
 The four generators write train.bin, val.bin and meta.json into a data_*
@@ -23,11 +26,14 @@ import sys
 BUILDERS = {"code": "corpora.code",
             "arithmetic": "corpora.arithmetic",
             "chat": "corpora.chat",
+            "self-knowledge": "corpora.chat",
             "chess": "corpora.chess_games",
             "expand": "corpora.expand",
             "fetch": "corpora.fetch",
             "reasoning": "corpora.reasoning",
             "pg19": "corpora.pg19",
+            "enwik9": "corpora.enwik9",
+            "agent": "corpora.agent",
             "all": "corpora.build"}
 
 
@@ -36,6 +42,9 @@ def main():
         print(__doc__.strip(), file=sys.stderr)
         return 2
     name = sys.argv.pop(1)
+    if name == "self-knowledge" and not any(
+            arg == "--out" or arg.startswith("--out=") for arg in sys.argv[1:]):
+        sys.argv[1:1] = ["--out", "data_self_chat_char"]
     import importlib
     return importlib.import_module(BUILDERS[name]).main()
 
