@@ -785,7 +785,7 @@ weights/
     e00000.npz ...
 ```
 
-Training resumes from it - weights, Adam moments and step count - and advances it whenever a run improves on what is there, so a session run only to check something still contributes if it finds anything. The directory holds the **best** state the model has reached, not the most recent one. Writes are atomic: every file is written to a `.tmp` and renamed, so an interrupted save cannot leave a half-written weight behind.
+Training resumes from it - weights, Adam moments and step count - and advances it whenever a run improves on what is there, so a session run only to check something still contributes if it finds anything. The directory holds the **best** state the model has reached, not the most recent one. Individual weight-file replacements are atomic (`.tmp` then rename), but a checkpoint spans multiple files and is **not** a transactional snapshot. An interrupted save can leave a mixture of save stages. Back up the complete weights directory before recovery tests; see [the checkpoint recovery guide](REBUILD.md#checkpoint-recovery-and-safe-debugging).
 
 The directory is written on the first run.
 
