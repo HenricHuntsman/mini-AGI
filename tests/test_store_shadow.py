@@ -129,6 +129,9 @@ class WeightShadowTest(unittest.TestCase):
                     self.assertTrue(torch.equal(opt.state[param]["exp_avg"], avg))
                     self.assertTrue(torch.equal(
                         opt.state[param]["exp_avg_sq"], avg_sq))
+                # Upstream evictions now write asynchronously; require the
+                # same persisted overlay after the writer has landed it.
+                pool.tiers.drain()
                 self.assertTrue(os.path.exists(os.path.join(
                     shadow.path, "experts", "e00000.npz")))
                 pool.tiers.delete(1)

@@ -14,6 +14,8 @@ LEGACY_CONFIG_ENV = "MINI_AGI_CONFIG"
 
 
 def load(path=None):
+    """config.yaml, or the file MINAGI_CONFIG names - which is how a run that
+    compares settings gives each arm its own (tools/ab_pool.py)."""
     import yaml
     path = (path or os.environ.get(CONFIG_ENV)
             or os.environ.get(LEGACY_CONFIG_ENV) or DEFAULT)

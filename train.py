@@ -56,10 +56,14 @@ import torch
 import torch.nn as nn
 
 from minagi.recur import RecurConfig, RecurCoder, load_recur
-from minagi.pool import PooledMLP, AutoGrow
+from minagi.model import watch_logits
+from minagi.pool import PooledMLP, AutoGrow, split_trunk_pool
 from minagi.stream import StreamSet, Evaluator, detach_caches, ramp_context
 from minagi.plasticity import Plasticity
+from minagi.governor import Governor, DEFAULTS as CHECKS, steps_of
+from minagi.lanes import LaneSchedule
 from minagi.optim import GradSNR
+from minagi import heldout
 from minagi import store as weights_store
 from minagi.training_policy import chars_to_steps, growth_held_due, lr_at
 from minagi.history import JsonlRecorder, append_jsonl, truncate_history
@@ -92,14 +96,30 @@ def _resync_opt(opt, model, args):
     # a group added mid-run needs the anchor the schedule scales from, or it
     # would sit at whatever rate it was born with while everything else decays
     base = args.lr
-    if mats:
-        opt.add_param_group({"params": mats, "name": "pool",
+    from minagi.muon import adopt
+    for on, ps in (adopt(opt, model, mats) if mats else []):
+        opt.add_param_group({"params": ps, "name": "pool", "muon": on,
                              "weight_decay": args.wd,
                              "lr": base, "base_lr": base})
     if vecs:
         opt.add_param_group({"params": vecs, "name": "pool",
                              "weight_decay": 0.0,
                              "lr": base, "base_lr": base})
+
+
+def _auto_device():
+    """
+    The device to use when --device is not given: CUDA (or ROCm, which torch
+    also calls cuda) where there is one, else Apple Silicon's GPU (MPS), else
+    the CPU. An MPS forward computes in fp32 - minagi/precision.py turns
+    autocast on only for CUDA, ROCm, XPU and a CPU with bf16 arithmetic.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def cmd_stream(args):
@@ -561,6 +581,89 @@ def _lanes(files, seed, roots=None, resume=0):
             for j, k in enumerate(sorted(by))]
 
 
+def _lane_weights(spec, names):
+    """
+    Fixed weights for the subjects, from "subject=weight,..." or a mapping,
+    each weight above 0 and at most 1; a subject not named weighs 1. Empty
+    when nothing is set - and then the schedule decides (minagi/lanes.py).
+    A subject at 0.25 gets a quarter of the reading of one at 1.
+    """
+    if isinstance(spec, dict):
+        pairs = list(spec.items())
+    else:
+        pairs = [p.split("=", 1) for p in str(spec or "").split(",")
+                 if p.strip()]
+    weights = {}
+    for pair in pairs:
+        if len(pair) != 2:
+            raise SystemExit(f"--lane-weights: {'='.join(pair)!r} is not "
+                             f"subject=weight")
+        name, w = str(pair[0]).strip(), float(pair[1])
+        if name not in names:
+            raise SystemExit(f"--lane-weights names {name!r}, which is not a "
+                             f"subject here: {', '.join(names)}")
+        if not 0 < w <= 1:
+            raise SystemExit(f"--lane-weights: {name} at {w:g} - a weight is "
+                             f"above 0 and at most 1")
+        weights[name] = w
+    return weights
+
+
+def _window_bounds(saved, start, block, ceiling):
+    """The window a session reads at, and the most it may grow to: (now,
+    most). It starts where the checkpoint left it (`saved`), or at `start`
+    for a model that has not grown one. The most is the smaller of `block`,
+    how far the rotary tables were built, and `ceiling` - --context, how far
+    this card can afford - and it binds on a resumed window too: lowering
+    --context must bring a grown window down, or a run that no longer fits
+    the card dies on its first step."""
+    most = max(64, min(int(block), int(ceiling)))
+    return max(64, min(int(saved or start), most)), most
+
+
+def _window_gain(by_pos, ctx, chunk):
+    """How much better the model predicts deep into the window than early in
+    it: the mean loss over the first half of the window's chunk positions
+    minus the mean over its last quarter, from `by_pos` (chunk position ->
+    losses). Positive means it is using the distance it has, and would use
+    more; near zero, the far end of the window is carried for nothing. None
+    with fewer than 8 losses at either end."""
+    n = max(2, int(ctx) // int(chunk))
+    early = [l for p, ls in by_pos.items() if p < n * 0.5 for l in ls]
+    late = [l for p, ls in by_pos.items() if p >= n * 0.75 for l in ls]
+    if len(early) < 8 or len(late) < 8:
+        return None
+    return float(np.mean(early) - np.mean(late))
+
+
+def _visit_chunks(ctx, chunk, passage):
+    """How many chunks make up one visit to a file.
+
+    `passage` is in characters and says how far the reader walks through
+    one file before moving to another subject. The window slides along it
+    a chunk at a time, so a visit is passage/chunk steps - and it must be
+    at least one window, or the window never fills and the model is asked
+    to read with less context than it has.
+
+    This used to be `min_visit_chunks`, in chunks, rounded up to whole
+    context windows - so the number in the config was not the number in
+    effect. At 16 with a 32,768 window it silently became 64.
+    """
+    least = max(1, -(-int(ctx) // int(chunk)))          # one full window
+    want = max(1, -(-int(passage) // int(chunk)))
+    return max(least, want)
+
+
+def _may_grow(gap, max_gap):
+    """Whether held-out lets the pool grow: not once train and held-out have
+    separated by `max_gap` or more - that is memorising, and more capacity
+    would make it worse. A gap not yet measured, or `max_gap` 0, holds
+    nothing back. Everything else growth asks - is capacity idle, are recent
+    additions earning, is there room - is asked of the network as it is,
+    inside AutoGrow."""
+    return gap is None or max_gap <= 0 or gap < max_gap
+
+
 def _truncate_history(path, chars):
     """Compatibility wrapper around the shared history cleanup helper."""
     try:
@@ -570,6 +673,33 @@ def _truncate_history(path, chars):
                   f"{chars/1e6:.1f}M - superseded by this resume", flush=True)
     except OSError as e:
         print(f"  (history not trimmed: {e})", flush=True)
+
+
+def confirm_drop(n, wdir, ask=input):
+    """
+    Whether to go ahead with --drop-quietest N. It deletes experts, files and
+    all, and nothing but a backup brings them back - and a flag left in a
+    command copied from the last restart deletes another N. So it is asked at
+    launch, before anything loads, while whoever started the run is still
+    there, and the answer is the number typed back: a reflexive "y" does not
+    count. With no one to ask - no input at all - the answer is no.
+    """
+    have = ""
+    try:
+        with open(os.path.join(wdir, "manifest.json")) as f:
+            have = f" of the {int(json.load(f)['n_experts'])}"
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    print(f"\n  --drop-quietest {n} deletes the {n} quietest{have} experts in "
+          f"{wdir}/, files and all. It cannot be undone.", flush=True)
+    try:
+        said = ask(f"  Type {n} to delete them; anything else keeps them: ")
+    except EOFError:
+        said = ""
+    if said.strip() == str(n):
+        return True
+    print("  kept: nothing will be dropped", flush=True)
+    return False
 
 
 def cmd_read(args):
@@ -607,6 +737,9 @@ def _cmd_read(args, dry_shadow=None):
             "--dwell counted SEGMENTS and is gone. Use --dwell-chars, in "
             "characters: the old default of 4 is --dwell-chars 2048.")
 
+    if args.drop_quietest and not confirm_drop(int(args.drop_quietest),
+                                               args.weights_dir):
+        args.drop_quietest = 0
     # EVERY CADENCE IS CONFIGURED IN CHARACTERS AND USED IN STEPS.
     #
     # A step is `--chunk` characters, so anything counted in steps silently
@@ -864,13 +997,14 @@ def _cmd_read(args, dry_shadow=None):
               f"- faster, and it needs the memory depth was using")
     trunk, pool_ps = _split_trunk_pool(model)
 
-    tg = {"params": trunk, "name": "trunk", "weight_decay": args.wd,
-          "lr": args.lr * args.trunk_lr_mult,
-          "base_lr": args.lr * args.trunk_lr_mult}
-    pg = {"params": pool_ps, "name": "pool", "weight_decay": args.wd,
-          "lr": args.lr, "base_lr": args.lr}
-    opt = torch.optim.AdamW([tg, pg], lr=args.lr, betas=(0.9, 0.95),
-                            fused=(device.type == "cuda"))
+    # AdamW, or Muon for the weight matrices (training.optimizer) - the one
+    # factory every learner builds its optimiser with (minagi/muon.py)
+    from minagi import muon
+    opt = muon.build(model, trunk, pool_ps, args.lr,
+                     args.lr * args.trunk_lr_mult, args.wd,
+                     kind=args.optimizer, fused=(device.type == "cuda"),
+                     which=args.muon_params)
+    print(f"  {muon.describe(opt)}")
     snr = GradSNR()
     print(f"  trunk learns at {args.trunk_lr_mult:g}x the pool's rate "
           f"({sum(q.numel() for q in trunk)/1e6:.1f}M trunk, "
@@ -883,16 +1017,70 @@ def _cmd_read(args, dry_shadow=None):
     # sample log states the window with every entry so no comparison is made
     # blind.
     # held-out is configured in CHARACTERS per domain and read in chunks
-    eval_steps = max(1, int(args.eval_chunks) // max(1, args.chunk))
-    sample_eval_steps = max(1, int(args.sample_eval_chunks)
-                            // max(1, args.chunk))
+    eval_steps = steps_of(args.eval_chunks, args.chunk)
+    sample_eval_steps = steps_of(args.sample_eval_chunks, args.chunk)
     ev = (FolderEvaluator(model, args.held_out, args.chunk, cfg.block, device)
           if args.held_out and os.path.isdir(args.held_out) else None)
+    # THE CHECK AND WHAT IT DOES TO THE RATE go through minagi/governor.py,
+    # the one path chat and the benchmarks' learning take as well. Its
+    # controller is put in below, once restored.
+    gov = (Governor(None, ev, args.chunk, every=args.sample_every,
+                    check_chars=args.sample_eval_chunks,
+                    eval_chars=args.eval_chunks)
+           if ev is not None else None)
+    checks_kept = ({"every": float(args.sample_every),
+                    "held_out": args.held_out,
+                    "check_chars": int(args.sample_eval_chunks),
+                    "eval_chars": int(args.eval_chunks)}
+                   if gov is not None and args.sample_every
+                   else (man or {}).get("checks"))
     before = None
+    # THE LEVEL CHECKS REPORT AT. Every evaluation here reads whole blocks
+    # spread over all of each subject. A check reads a few, and a few blocks
+    # sit a little above or below the whole set by an amount that stays put
+    # while they do - so the start reads the larger evaluation and the
+    # checks' own blocks side by side, and every check this session reports
+    # what it reads plus the difference between the two (minagi/heldout.py).
+    # The check as it was read before checks were spread, from the top of
+    # each subject, is read as well, so the log says how far those sat from
+    # this level.
+    level, held, parts = {}, None, None
     if ev is not None:
-        v = ev.run(eval_steps); se = v.pop("stderr", 0.0)
+        v, se, c = gov.start()
         before = float(np.mean(list(v.values())))
-        print(f"  before: {before:.4f} +/-{se:.4f} on {args.held_out}")
+        top = ev.run(sample_eval_steps); top.pop("stderr", None)
+        level = gov.level
+        # The first session to count whole blocks only reads the old blocks
+        # too, once, so the log can move everything before it onto the new
+        # level (minagi/heldout.py, part_shift).
+        try:
+            with open(args.sample_log, errors="ignore") as f:
+                counted = heldout.part_shift(f.read()) is not None
+        except (OSError, TypeError):
+            counted = True               # no log: nothing before to move
+        if not counted and args.sample_every:
+            old = FolderEvaluator(model, args.held_out, args.chunk, cfg.block,
+                                  device, whole=False)
+            parts = old.run(eval_steps, spread=True)
+            parts.pop("stderr", None)
+            print(f"  held-out now counts whole blocks only: {before:.4f}; "
+                  f"with each file's leftover part-block, as before, "
+                  f"{np.mean(list(parts.values())):.4f} - the log draws "
+                  f"earlier checks moved by the difference, subject by "
+                  f"subject")
+            # the best this run has seen was read on the old blocks too
+            best_val -= float(np.mean(list(parts.values()))) - before
+        held = (dict(v), c, top, parts)
+        print(f"  before: {before:.4f} +/-{se:.4f} on {args.held_out}, "
+              f"{-(-eval_steps // ev.per)} blocks of each subject spread "
+              f"over all of it")
+        print(f"  checks read {-(-sample_eval_steps // ev.per)} blocks of "
+              f"each: {np.mean(list(c.values())):.4f} here, so they report "
+              f"{before - np.mean(list(c.values())):+.4f} from what they "
+              f"read; from the top of each subject, as checks read before, "
+              f"{np.mean(list(top.values())):.4f}")
+        # the best this run has seen includes what it has just measured
+        best_val = min(best_val, before)
 
     pool.attach_optimiser(opt)
     # ADAM'S MOMENTS. They are written to optim.npz at every checkpoint and
@@ -972,20 +1160,24 @@ def _cmd_read(args, dry_shadow=None):
         # Append. A resumed run continues the same model, so wiping the file
         # would throw away the only record of how it got here; the banner is
         # what separates one session from the next.
-        with open(args.sample_log, "a") as f:
+        with open(args.sample_log, "a", encoding="utf-8",
+                  errors="replace") as f:
             f.write(f"\n\n{'#' * 78}\n")
             f.write(f"# session started {time.strftime('%Y-%m-%d %H:%M')}  "
                     f"at step {step:,}, {base_chars/1e6:.1f}M of "
                     f"{info['characters']/1e6:,.0f}M characters read "
                     f"({100.0 * base_chars / max(info['characters'], 1):.2f}%), "
                     f"{pool.n_experts()} experts\n")
+            if held is not None:
+                # what the start measured, and so the level of every check
+                # below it - read back by the plots and the README
+                f.write(heldout.banner(*held))
             f.write(f"{'#' * 78}\n")
 
     # The window starts where the model left it, not at the ceiling. RoPE
     # carries no learned parameters, so the same weights read at any length;
     # what a model cannot do is jump to a length it has never seen, which is
     # why this moves a character at a time.
-    ctx_now = int(man.get("context_now") or args.context_start)
     # --context is a CEILING that binds on resume, not only on a fresh model.
     # It used to be clamped to cfg.block alone, and both cfg.block and
     # context_now come out of the checkpoint - so lowering model.context in
@@ -1004,8 +1196,9 @@ def _cmd_read(args, dry_shadow=None):
     # context 4,151 -> 4,492 over two hours while VRAM went 7,271 -> 7,790 MB,
     # and it died on the way. That looks exactly like a leak from the outside,
     # which is what it was reported as.
-    ctx_max = max(64, min(int(cfg.block), int(args.context)))
-    ctx_now = max(64, min(ctx_now, ctx_max))
+    ctx_now, ctx_max = _window_bounds(man.get("context_now"),
+                                      args.context_start, cfg.block,
+                                      args.context)
     if ctx_now < int(man.get("context_now") or 0):
         print(f"  window held at {ctx_now:,} by --context-end "
               f"(the checkpoint had grown to "
@@ -1015,20 +1208,8 @@ def _cmd_read(args, dry_shadow=None):
     by_pos = collections.defaultdict(list)
 
     def context_gain():
-        """
-        How much better the model predicts deep into the window than early in
-        it. Positive means it is using the distance it has - and would use
-        more. Near zero means the far end of the window is being carried for
-        nothing.
-        """
-        n_buckets = max(2, ctx_now // args.chunk)
-        early = [l for p, ls in by_pos.items() if p < n_buckets * 0.5
-                 for l in ls]
-        late = [l for p, ls in by_pos.items() if p >= n_buckets * 0.75
-                for l in ls]
-        if len(early) < 8 or len(late) < 8:
-            return None
-        return float(np.mean(early) - np.mean(late))
+        """_window_gain at the window as it stands now."""
+        return _window_gain(by_pos, ctx_now, args.chunk)
 
     # A RESUME SUPERSEDES WHATEVER THE OLD BRANCH WROTE. The history log is
     # append-only and its character counter is not monotonic across a restart:
@@ -1046,35 +1227,49 @@ def _cmd_read(args, dry_shadow=None):
     # One lane per subject, rotated a window at a time.
     lanes = _lanes(files, args.shuffle_seed, args.paths,
                    resume=int(man.get("read_chars", 0) or 0))
-    # How long a subject is read for before the next one. It is a whole
-    # number of context windows - a window never spans two subjects, because
-    # attention across the seam where chess becomes Python teaches nothing -
-    # but a subject may take several windows in a row.
-    #
-    # The floor matters at small windows. Tied to the window alone, a 2,048
-    # context would change subject every four chunks, and the first chunk
-    # after a change picks its experts from the states of the subject just
-    # left. At four chunks a visit that is a quarter of all reading.
+    # WHICH SUBJECT NEXT - minagi/lanes.py. By default the share each gets
+    # follows where reading still lowers held-out most, read off the run's
+    # own checks; fixed weights pin it; `equal` is the old even rotation.
+    fixed = _lane_weights(getattr(args, "lane_weights", ""),
+                          [l.name for l in lanes])
+    mode = "fixed" if fixed else getattr(args, "lane_schedule", "auto")
+    sizes = {l.name: sum(os.path.getsize(p) for p in l.paths
+                         if os.path.exists(p)) for l in lanes}
+    sched = LaneSchedule.restore(
+        (man or {}).get("lanes"), [l.name for l in lanes], sizes,
+        list(ev.groups) if ev is not None else [], mode=mode, weights=fixed,
+        total=float(man.get("read_chars", 0) or 0))
+    if parts is not None:
+        # the level held-out is read at has just moved: fit again from the
+        # log, which draws everything before on the new level
+        sched.fits, sched.last = {}, None
+    if (mode == "auto" and not sched.fits and args.sample_log
+            and os.path.exists(args.sample_log)):
+        # nothing saved yet: the log holds every check the run has made
+        from minagi.heldout import parse_log
+        try:
+            sched.bootstrap(parse_log(args.sample_log))
+            if sched.fits:
+                print(f"  reading shares: fits seeded from the checks in "
+                      f"{args.sample_log}", flush=True)
+        except OSError:
+            pass
+    print(f"  {sched.describe()}", flush=True)
+    lane_of = {l.name: l for l in lanes}
+    # How long a subject is read for before the next one: --passage
+    # characters of one file, and never less than a window. A window never
+    # spans two subjects - each visit reads one file, and its window ends at
+    # that file's cursor - because attention across the seam where chess
+    # becomes Python teaches nothing.
     def visit_chunks(ctx):
-        """How many chunks make up one visit to a file.
-
-        `--passage` is in characters and says how far the reader walks through
-        one file before moving to another subject. The window slides along it
-        a chunk at a time, so a visit is passage/chunk steps - and it must be
-        at least one window, or the window never fills and the model is asked
-        to read with less context than it has.
-
-        This used to be `min_visit_chunks`, in chunks, rounded up to whole
-        context windows - so the number in the config was not the number in
-        effect. At 16 with a 32,768 window it silently became 64.
-        """
-        least = max(1, -(-ctx // args.chunk))          # one full window
-        want = max(1, -(-args.passage // args.chunk))
-        return max(least, want)
+        """_visit_chunks with this run's chunk and passage."""
+        return _visit_chunks(ctx, args.chunk, args.passage)
 
     turn = visit_chunks(ctx_now)
     wants_more = False          # whether the evidence says to keep growing
     target = info["characters"] * max(1, args.passes)
+    if args.max_chars:
+        target = min(target, int(args.max_chars))
     print(f"  {len(lanes)} subjects, reading {turn * args.chunk:,} characters "
           f"from one before moving to the next"
           + (f" ({turn * args.chunk // ctx_now} windows of {ctx_now:,})"
@@ -1120,12 +1315,24 @@ def _cmd_read(args, dry_shadow=None):
                            extra={"read_chars": base_chars + seen,
                                   "read_nats": nats,
                                   "plasticity": plast.state(),
+                                  "lanes": sched.state(),
+                                  # the base the controller scales, so a
+                                  # stream that carries this run on - chat,
+                                  # a test read while learning - steps at
+                                  # the run's own rate (minagi/live.py)
+                                  "lr": args.lr,
+                                  # how this run reads its checks, so a
+                                  # stream that carries it on reads them
+                                  # the same way (minagi/governor.py)
+                                  "checks": checks_kept,
                                   "context_now": ctx_now})
         log_history(val)
 
     stop = False
     swapped = 0
     recent = collections.deque(maxlen=400)     # the training loss lately
+    loss_log = (open(args.loss_log, "a", buffering=1, encoding="utf-8")
+                if getattr(args, "loss_log", None) else None)
     last_gap = None                            # held-out minus train, when known
     # How much information has been read, as against how many characters were
     # passed over: the loss IS the information content of what was read, so
@@ -1139,10 +1346,26 @@ def _cmd_read(args, dry_shadow=None):
     # There is no lr_origin any more and nothing counts characters: see
     # minagi/plasticity.py for the two rules and why they are symmetric.
     plast = Plasticity.restore((man or {}).get("plasticity"))
+    if ((man or {}).get("plasticity") and not plast.has_fits()
+            and args.sample_log and os.path.exists(args.sample_log)):
+        # A state with no fits - written by the controller that kept rotation
+        # levels instead - would sit blind for two hours of rounds. The sample
+        # log has the readings.
+        try:
+            with open(args.sample_log, errors="ignore") as f:
+                got = Plasticity.log_readings(f.read())
+            plast.seed(got)
+            print(f"  plasticity: fits seeded from the last "
+                  f"{sum(g is not None for g in got[-Plasticity.SEED:])} "
+                  f"held-out readings in {args.sample_log}", flush=True)
+        except OSError:
+            pass
     if args.lr_reset:
         plast.scale = 1.0
         print("  plasticity RESET: full learning rate restored", flush=True)
     print(f"  {plast.describe()}", flush=True)
+    if gov is not None:
+        gov.plast = plast
     nats = float(man.get("read_nats") or 0.0) if man else 0.0
     if not nats and base_chars:
         # A checkpoint written before this was tracked has the characters but
@@ -1157,6 +1380,19 @@ def _cmd_read(args, dry_shadow=None):
               f"at {float(before or 1.2):.3f} nats each", flush=True)
     grads = collections.deque(maxlen=400)      # and the gradient norms
     last_save = time.time()
+    if args.drop_quietest:
+        # A one-off before reading: the experts with the smallest gates go,
+        # files and rows. Written down at once, as growth and pruning are.
+        out = pool.drop_quietest(int(args.drop_quietest), step=step,
+                                 survival=survival_steps)
+        _resync_opt(opt, model, args)
+        pool.attach_optimiser(opt)
+        if args.save:
+            checkpoint()
+        print(f"  dropped the {len(out)} quietest experts, |gate| "
+              f"{out[0][1]:.4f} to {out[-1][1]:.4f}; {pool.n_experts()} left"
+              if out else "  nothing to drop: every expert is on the card or "
+              "inside its trial", flush=True)
     mark_t, mark_c = time.time(), 0            # for the reading rate
     tracer = (_Tracer(args.trace_routes, args.trace_chunks)
               if args.trace_routes else None)
@@ -1186,13 +1422,15 @@ def _cmd_read(args, dry_shadow=None):
     # score swung by two nats depending on which subject the reader happened
     # to be inside.
     while not stop and seen < target:
-        for lane in lanes:
+        # one visit at a time, to the subject the schedule picks next
+        for lane in (lane_of[sched.pick()],):
             r = lane.open(model, args.chunk, ctx_now, device,
                           turn * args.chunk)
             if r is None:
                 continue
             path, data = r.name, r.data
             fl = []
+            visit_from = seen
             for j in range(turn):
                 if r.done():
                     break
@@ -1251,6 +1489,20 @@ def _cmd_read(args, dry_shadow=None):
                 # gradient at the chunk boundary.
                 fl.append(float(loss.detach()))
                 recent.append(float(loss.detach()))
+                if loss_log is not None:
+                    # every step's loss and where it was read, so two runs
+                    # that read the same text compare chunk by chunk: the
+                    # loss trained on, and the model's own part of it - the
+                    # number held-out reads, without the router's terms
+                    ml = getattr(r, "model_loss", None)
+                    loss_log.write(json.dumps(
+                        {"step": step, "lane": lane.name, "file": path,
+                         "pos": getattr(r, "pos", None), "j": j,
+                         "loss": round(float(loss.detach()), 6),
+                         "model": (round(float(ml), 6) if ml is not None
+                                   else None),
+                         "t": round(time.time(), 2)},
+                        separators=(",", ":")) + "\n")
                 by_pos[j].append(float(loss.detach()))
                 seen += args.chunk
                 nats += float(loss.detach()) * args.chunk
@@ -1268,10 +1520,17 @@ def _cmd_read(args, dry_shadow=None):
                                                       1e-6)
                     v_ = se_ = None
                     dom = None
-                    if ev is not None:
-                        d = ev.run(sample_eval_steps)
-                        se_ = d.pop("stderr", None)
-                        v_ = float(np.mean(list(d.values())))
+                    logits = {}
+                    if gov is not None:
+                        # the checks' blocks, at the level the start measured
+                        # - see `level` - and the largest attention logit
+                        # reading them computes, the same blocks every check
+                        with watch_logits(model) as logits:
+                            d, v_, se_ = gov.reading()
+                        sched.observe(base_chars + seen, d)
+                        moved_share = sched.step()
+                        if moved_share:
+                            print(f"    {moved_share}", flush=True)
                         # The generalisation gap, kept for the growth
                         # decision. It is the thing the density ceiling was
                         # always a proxy for, and unlike density it is
@@ -1279,9 +1538,22 @@ def _cmd_read(args, dry_shadow=None):
                         if recent:
                             last_gap = v_ - float(np.mean(recent))
                         dom = dict(d)
-                        moved_lr = plast.observe(v_, se_)
+                        # the controller observes it - as in chat and the
+                        # benchmarks
+                        moved_lr = gov.govern(v_, se_)
                         if moved_lr:
                             print(f"    {moved_lr}", flush=True)
+                        # REMOVING THIS: delete these five lines and
+                        # minagi/notify.py. Nothing else refers to either, and
+                        # the import is guarded so the run does not notice.
+                        if v_ < best_val:
+                            prev_best, best_val = best_val, v_
+                            try:
+                                from minagi import notify
+                                notify.best(v_, base_chars + seen,
+                                            pool.n_experts(), prev_best)
+                            except Exception:
+                                pass
                     # WRITING SPEED: the characters the samples wrote over the
                     # time spent writing them. Every reading writes exactly
                     # sample_chars.
@@ -1301,12 +1573,18 @@ def _cmd_read(args, dry_shadow=None):
                                   context_gain(), read_rate,
                                   float(np.mean(grads)) if grads else None,
                                   args.clip, plast.state(),
-                                  write_rate=write_rate)
+                                  write_rate=write_rate,
+                                  level=(float(np.mean(list(level.values())))
+                                         if level and v_ is not None
+                                         else None),
+                                  logits=logits)
                     rp = pool.report()
                     print(f"    samples -> {args.sample_log}"
                           + (f"  train {float(np.mean(recent)):.4f}"
                              if recent else "")
                           + (f"  held-out {v_:.4f}" if v_ is not None else "")
+                          + (f"  logit {max(logits.values()):.1f}"
+                             if logits else "")
                           + (f"  signal {snr.ratio():.3f}"
                              if snr.ratio() is not None else "")
                           + f"  | {swapped/max(did,1):.1f} experts loaded "
@@ -1395,9 +1673,7 @@ def _cmd_read(args, dry_shadow=None):
                     # it stood in for: correlation with the gap +0.20, not
                     # monotonic. It held growth off for 14M characters on
                     # evidence that did not exist.
-                    gap_ok = (last_gap is None or args.max_gap <= 0
-                              or last_gap < args.max_gap)
-                    may_grow = gap_ok
+                    may_grow = _may_grow(last_gap, args.max_gap)
                     if not may_grow and _growth_held_due(
                             step, grow_every_steps):
                         print(f"    growth held: train and held-out have "
@@ -1440,6 +1716,7 @@ def _cmd_read(args, dry_shadow=None):
                           f"({seen/1e6:.1f}M characters)", flush=True)
                 stop = True
             lane.rest(model)               # the window is done; free its cache
+            sched.note_read(lane.name, seen - visit_from)
             if fl:
                 losses.append(float(np.mean(fl)))
                 if args.verbose:
@@ -1457,7 +1734,7 @@ def _cmd_read(args, dry_shadow=None):
         print(f"  mean loss over the files: {np.mean(losses):.4f}")
 
     if ev is not None:
-        v = ev.run(eval_steps); se = v.pop("stderr", 0.0)
+        v = ev.run(eval_steps, spread=True); se = v.pop("stderr", 0.0)
         after = float(np.mean(list(v.values())))
         d = after - before
         print(f"  after:  {after:.4f} +/-{se:.4f}   {d:+.4f}")
@@ -1495,6 +1772,16 @@ def _cmd_read(args, dry_shadow=None):
                            extra={"read_chars": base_chars + seen,
                                   "read_nats": nats,
                                   "plasticity": plast.state(),
+                                  "lanes": sched.state(),
+                                  # the base the controller scales, so a
+                                  # stream that carries this run on - chat,
+                                  # a test read while learning - steps at
+                                  # the run's own rate (minagi/live.py)
+                                  "lr": args.lr,
+                                  # how this run reads its checks, so a
+                                  # stream that carries it on reads them
+                                  # the same way (minagi/governor.py)
+                                  "checks": checks_kept,
                                   "context_now": ctx_now})
         print(f"  weights/ updated - the model has read this and kept it")
     else:
@@ -1533,6 +1820,11 @@ SAMPLE_PROMPTS = [
     ("self-knowledge",
      "<user>\nhow do you decide which experts to use?\n</user>\n<bot>\n"),
 ]
+
+
+# Keep introspection pointed at the training implementation while cmd_read's
+# entry wrapper owns the temporary dry-run storage lifetime.
+cmd_read.__wrapped__ = _cmd_read
 
 
 @torch.no_grad()
@@ -1731,20 +2023,24 @@ def _dropped_note(model):
             f"({dropped:,} of {routed:,})")
 
 
-_PLOTS = {"proc": None, "on": True, "since": None, "log": None,
-          "weights": None}
+# `out` is where the graphs go and `tools` where their plotters are - runs/
+# and this repository's tools/ unless a test says otherwise, so a test never
+# draws over a run's graphs or touches the plotters a running run uses
+_PLOTS = {"procs": [], "on": True, "since": None, "log": None,
+          "weights": None, "out": None, "tools": None}
 
 
 def refresh_plots():
     """Redraw the graphs from the log just written. Never raises, never waits."""
     if not _PLOTS["on"]:
         return
-    p = _PLOTS["proc"]
-    if p is not None and p.poll() is None:
+    if any(p.poll() is None for p in _PLOTS["procs"]):
         return                          # the last one has not finished
     import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
-    tool = os.path.join(here, "tools", "plot_progress.py")
+    tools = _PLOTS.get("tools") or os.path.join(here, "tools")
+    out = _PLOTS.get("out") or "runs"
+    tool = os.path.join(tools, "plot_progress.py")
     if not os.path.exists(tool):
         _PLOTS["on"] = False
         return
@@ -1763,30 +2059,36 @@ def refresh_plots():
     # fitted trend becomes a ruler. Useless inside a trailing window, which is
     # exactly where the dashboard lives.
     cmds = [[sys.executable, tool, "--log", log, "--logx",
-             "--out", "runs/training_progress.png"]]
-    dash = os.path.join(here, "tools", "plot_dashboard.py")
+             "--out", os.path.join(out, "training_progress.png")]]
+    dash = os.path.join(tools, "plot_dashboard.py")
     if os.path.exists(dash):
         c = [sys.executable, dash, "--log", log,
              "--weights", _PLOTS.get("weights") or "weights",
-             "--out", "runs/dashboard.png"]
+             "--out", os.path.join(out, "dashboard.png")]
         if _PLOTS["since"] is not None:
             c += ["--last", str(_PLOTS["since"])]
         cmds.append(c)
+    # Each plotter is started as itself, with an argument list: no shell, so
+    # nothing to quote and no `bash` to find (on Windows that name can be WSL's,
+    # which cannot run a D:/ path). They write different files, so they draw
+    # side by side; every child is kept, so the next refresh waits for all of
+    # them, including any started before a later one failed to start.
+    _PLOTS["procs"] = []
     try:
-        script = " && ".join(" ".join(f'"{x}"' for x in c) for c in cmds)
-        _PLOTS["proc"] = subprocess.Popen(
-            ["bash", "-c", script], cwd=here,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for c in cmds:
+            _PLOTS["procs"].append(subprocess.Popen(
+                c, cwd=here,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     except OSError:
-        _PLOTS["on"] = False            # no python, no bash - stop trying
+        _PLOTS["on"] = False            # no python to run them - stop trying
 
 
 def write_samples(path, step, chars, minutes, samples, val=None, se=None,
                   per_domain=None, experts=None, train=None, lr=None,
                   corpus=None, context=None, ceiling=None, gain=None,
                   rate=None, gnorm=None, clip=None, plast=None,
-                  write_rate=None):
-    with open(path, "a") as f:
+                  write_rate=None, level=None, logits=None):
+    with open(path, "a", encoding="utf-8", errors="replace") as f:
         f.write(f"\n{'=' * 78}\n")
         # How much has been read, against how much there is. A bare count of
         # characters read says nothing on its own - the same 4M is most of a
@@ -1840,7 +2142,7 @@ def write_samples(path, step, chars, minutes, samples, val=None, se=None,
                 f.write(f"   lr {lr:.2e}")
             if plast:
                 # What the rate controller can currently prove. t is the
-                # verdict: it eases the rate UP above T_MID (1.25) and down
+                # verdict: it eases the rate UP above T_MID (2.2) and down
                 # below it, so the number says which way it is leaning before
                 # the rate has moved. `effect` is the number the verdict is
                 # now built from - improvement per evaluation in units of the
@@ -1850,8 +2152,17 @@ def write_samples(path, step, chars, minutes, samples, val=None, se=None,
                 f.write(f"   evidence t {plast.get('t', 0):+.2f}"
                         f" over {plast.get('n', 0)}"
                         f" (effect {plast.get('e', 0):+.4f})"
-                        f"   rate x{plast.get('scale', 1):.3f}")
+                        f"   rate x{Plasticity.shown(plast.get('scale', 1))}")
             f.write("\n")
+        if logits:
+            # The largest score softmax was taken of while the check read its
+            # blocks, and each attention's own. Under Muon it can grow until
+            # a softmax saturates on one key (minagi/model.py, watch_logits).
+            # Written before held-out, where tools/export_history.py closes
+            # a record.
+            f.write(f"attention logit {max(logits.values()):.2f} at most   "
+                    + "   ".join(f"{n.replace('.attn', '')} {v:.2f}"
+                                 for n, v in logits.items()) + "\n")
         if val is not None:
             f.write(f"held-out loss {val:.4f}")
             if se:
@@ -1863,6 +2174,10 @@ def write_samples(path, step, chars, minutes, samples, val=None, se=None,
                     f"   perplexity {math.exp(val):.2f}")
             if train is not None:
                 f.write(f"   gap {val - train:+.4f}")
+            if level is not None:
+                # what the check's own blocks read is this much the other
+                # way: the number above is at the session start's level
+                f.write(f"   level {level:+.4f}")
             f.write("\n")
             if per_domain:
                 f.write("  " + "   ".join(
@@ -1907,30 +2222,9 @@ def write_samples(path, step, chars, minutes, samples, val=None, se=None,
     return path
 
 def _split_trunk_pool(model):
-    """
-    Which parameters are the pool's, and which are the shared body.
-
-    A resident pool keeps its experts as modules; a paged pool keeps three
-    stacked slot tensors instead, so the set has to be found by asking the
-    pool rather than by walking a ModuleList that is not there.
-    """
-    p = model.pool
-    ids = {id(p.gate)}
-    if hasattr(p, "experts") and p.experts is not None:
-        ids |= {id(q) for e in p.experts for q in e.parameters()}
-    for nm in ("w1", "w3", "w2"):
-        obj = getattr(p, nm, None)
-        if obj is None:
-            continue
-        ids |= ({id(obj)} if torch.is_tensor(obj)
-                else {id(q) for q in obj.parameters()})
-    for s in model.modules():
-        if isinstance(s, PooledMLP):
-            ids.add(id(s.router.weight))
-            ids.add(id(s.depth_emb))
-    trunk = [q for q in model.parameters() if id(q) not in ids]
-    pool = [q for q in model.parameters() if id(q) in ids]
-    return trunk, pool
+    """Which parameters are the pool's, and which are the shared body -
+    minagi/pool.py, where every learner finds the same split."""
+    return split_trunk_pool(model)
 
 
 def _router_width(wdir, man):
@@ -2057,6 +2351,16 @@ def build_paged(wdir, device, resident=None, ram_capacity=256, ceiling=None,
         pool.balance = float(_get_cfg(_c, "pool.balance", 0.0) or 0.0)
         pool.select_temperature = float(
             _get_cfg(_c, "pool.select_temperature", 0.0) or 0.0)
+        # how the chosen experts are weighted, the routing bias, and a
+        # newborn's gate - see PooledMLP._route and PagedPool.bias
+        ga = _get_cfg(_c, "pool.gate_after", False)
+        pool.gate_after = ("scaled" if str(ga).strip().lower() == "scaled"
+                           else bool(ga))
+        pool.route_bias = float(_get_cfg(_c, "pool.route_bias", 0.0) or 0.0)
+        pool.route_bias_offset = float(
+            _get_cfg(_c, "pool.route_bias_offset", 25.0) or 25.0)
+        pool.birth_gate_parents = float(
+            _get_cfg(_c, "growth.birth_gate_parents", 0.0) or 0.0)
     except Exception:
         pass
     ever = cfgd.get("pool_ever")
@@ -2089,7 +2393,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="train mini-AGI: read files continually, or stream a "
                     "packed corpus. Batch 1, cached, chunked, either way")
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--device", default=_auto_device())
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     rd = sub.add_parser("read",
@@ -2131,13 +2435,16 @@ def main():
                     help="a folder of text to score before and after, so the "
                          "cost of reading is visible; each sub-folder is "
                          "reported separately")
-    rd.add_argument("--eval-chars", dest="eval_chunks", type=int, default=_cfg(_c, "data.eval_chars", 240 * 512),
-                    help="CHARACTERS of held-out read per domain per "
-                         "evaluation. A chunk count here meant the evaluation "
-                         "grew with the chunk: 60 chunks is 30,720 characters "
-                         "at chunk 512 and 122,880 at 2,048, so the same "
-                         "config would have quadrupled how long every sample "
-                         "takes")
+    rd.add_argument("--eval-chars", dest="eval_chunks", type=int, default=_cfg(_c, "data.eval_chars", CHECKS["eval_chars"]),
+                    help="CHARACTERS of held-out read per domain by the "
+                         "evaluation a session starts and ends with, in whole "
+                         "blocks spread over all of each domain; the start's "
+                         "sets the level every check reports at. As much as "
+                         "a domain holds reads all of it. A chunk count here "
+                         "meant the evaluation grew with the chunk: 60 chunks "
+                         "is 30,720 characters at chunk 512 and 122,880 at "
+                         "2,048, so the same config would have quadrupled how "
+                         "long every sample takes")
     rd.add_argument("--verbose", action="store_true")
     rd.add_argument("--shuffle-seed", type=int,
                     default=_cfg(_c, "data.shuffle_seed", 0),
@@ -2152,10 +2459,11 @@ def main():
                     help="minutes between checkpoints; 0 to save only at the "
                          "end")
     rd.add_argument("--sample-eval-chars", dest="sample_eval_chunks",
-                    type=int, default=60 * 512,
+                    type=int, default=CHECKS["check_chars"],
                     help="CHARACTERS of held-out scored alongside each "
-                         "sample; smaller than the full evaluation so it is "
-                         "quick")
+                         "sample, in whole blocks spread over all of each "
+                         "domain; smaller than the session's evaluation so it "
+                         "is quick, and reported at that evaluation's level")
     rd.add_argument("--minutes", type=float, default=0,
                     help="stop after this long")
     rd.add_argument("--trace-routes", default=None,
@@ -2180,6 +2488,17 @@ def main():
                          "it a chunk at a time. Distinct from model.context_end, "
                          "which is how far the model sees and how far the "
                          "gradient reaches")
+    rd.add_argument("--lane-schedule", choices=("auto", "equal"),
+                    default=_cfg(_c, "data.lane_schedule", "auto") or "auto",
+                    help="how the reading is shared between subjects: auto "
+                         "follows where reading still lowers held-out most "
+                         "(minagi/lanes.py); equal is the even rotation")
+    rd.add_argument("--lane-weights",
+                    default=_cfg(_c, "data.lane_weights", "") or "",
+                    help="subject=weight,... - pins each subject's share of "
+                         "the reading against the others', above 0 and at "
+                         "most 1 (unlisted subjects weigh 1), in place of the "
+                         "automatic schedule")
     rd.add_argument("--context-end", "--context", dest="context", type=int,
                     default=_cfg(_c, "model.context_end",
                                  _cfg(_c, "model.context", 24576)),
@@ -2258,6 +2577,24 @@ def main():
                          "0 disables. Neither usage brake can see a newborn, "
                          "so without this there is a whole trial in which "
                          "nothing on that side can refuse")
+    rd.add_argument("--drop-quietest", type=int, default=0, metavar="N",
+                    help="before reading, delete the N experts with the "
+                         "smallest gates - a one-off, asked for at launch: "
+                         "type N back to go ahead")
+    rd.add_argument("--optimizer", choices=("adamw", "muon"),
+                    default=str(_cfg(_c, "training.optimizer", "adamw")),
+                    help="adamw, or muon for the weight matrices and adamw "
+                         "for the rest (minagi/muon.py)")
+    rd.add_argument("--muon-params", choices=("all", "trunk", "pool"),
+                    default=str(_cfg(_c, "training.muon_params", "all")),
+                    help="which weight matrices muon steps")
+    rd.add_argument("--loss-log", default=None,
+                    help="write every step's loss, subject and file to this "
+                         "file, one JSON line each - for comparing runs that "
+                         "read the same text (tools/ab_pool.py)")
+    rd.add_argument("--max-chars", type=float, default=0,
+                    help="stop after reading this many characters "
+                         "(0: the whole corpus, --passes times)")
     rd.add_argument("--max-gap", type=float,
                     default=_cfg(_c, "growth.max_gap", 0.4),
                     help="hold growth when held-out minus train exceeds this; "
