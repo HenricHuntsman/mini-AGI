@@ -72,5 +72,77 @@ class ModelArtifactVerifierTests(unittest.TestCase):
                 inspect_model_artifact(tmp)
 
 
+    def assert_bad_manifest(self, change, pattern):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_model(tmp)
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = change(manifest)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, pattern):
+                inspect_model_artifact(tmp)
+
+    def test_reject_non_object_manifest(self):
+        self.assert_bad_manifest(lambda m: [], "JSON object")
+
+    def test_reject_non_object_expert_entry(self):
+        self.assert_bad_manifest(lambda m: {**m, "experts": [None]}, "entry")
+
+    def test_reject_parent_directory_traversal(self):
+        self.assert_bad_manifest(
+            lambda m: {**m, "experts": [{**m["experts"][0], "file": "../outside.npz"}]},
+            "filename")
+
+    def test_reject_windows_directory_traversal(self):
+        self.assert_bad_manifest(
+            lambda m: {**m, "experts": [{**m["experts"][0], "file": "..\\\\outside.npz"}]},
+            "filename")
+
+    def test_reject_absolute_expert_path(self):
+        self.assert_bad_manifest(
+            lambda m: {**m, "experts": [{**m["experts"][0], "file": "/tmp/outside.npz"}]},
+            "filename")
+
+    def test_reject_missing_expert_id(self):
+        self.assert_bad_manifest(
+            lambda m: {**m, "experts": [{"file": "e00000.npz", "params": 20}]},
+            "ID")
+
+    def test_reject_boolean_expert_id(self):
+        self.assert_bad_manifest(
+            lambda m: {**m, "experts": [{**m["experts"][0], "id": True}]},
+            "ID")
+
+    def test_reject_invalid_expert_count(self):
+        self.assert_bad_manifest(
+            lambda m: {**m, "n_experts": "not-a-number"},
+            "n_experts")
+
+    def test_reject_duplicate_expert_ids(self):
+        def mutate(m):
+            m["experts"].append({"id": 0, "file": "e00001.npz", "params": 20})
+            m["n_experts"] = 2
+            return m
+        self.assert_bad_manifest(mutate, "duplicate")
+
+    def test_reject_duplicate_expert_filenames(self):
+        def mutate(m):
+            m["experts"].append({"id": 1, "file": "e00000.npz", "params": 20})
+            m["n_experts"] = 2
+            return m
+        self.assert_bad_manifest(mutate, "duplicate")
+
+    def test_reject_symlink_expert_escape(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            self.make_model(tmp)
+            expert = Path(tmp) / "experts" / "e00000.npz"
+            expert.unlink()
+            target = Path(outside) / "e00000.npz"
+            target.write_bytes(b"not a real expert")
+            expert.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                inspect_model_artifact(tmp)
+
+
 if __name__ == "__main__":
     unittest.main()
