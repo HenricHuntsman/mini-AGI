@@ -352,6 +352,24 @@ class PooledMLP(nn.Module):
         expert's capacity, and count in none of the statistics or the
         balancing loss - the pool sees exactly what writing would ask of it.
         """
+        # During evaluation, a paged pool must not let later prompt tokens
+        # vote on the experts used by an earlier token. A full-chunk _route()
+        # admits from every position simultaneously, violating causality.
+        # Process positions in order while sharing the pool's admission state.
+        # Training keeps the original batched path for gradients and speed;
+        # training-window causality is a separate unresolved design problem.
+        if (not self.training and not torch.is_grad_enabled()
+                and hasattr(self.pool, "admitting") and x.shape[1] > 1):
+            pieces = []
+            for t in range(x.shape[1]):
+                if active is None:
+                    pieces.append(self._route(x[:, t:t + 1]))
+                elif bool(active[:, t].any()):
+                    pieces.append(self._route_active_token(
+                        x[:, t:t + 1], active[:, t:t + 1]))
+                else:
+                    pieces.append(torch.zeros_like(x[:, t:t + 1]))
+            return torch.cat(pieces, dim=1)
         if active is None or bool(active.all()):
             return self._route(x)
         B, T, D = x.shape
@@ -360,6 +378,14 @@ class PooledMLP(nn.Module):
         if bool(m.any()):
             out[m] = self._route(x.reshape(-1, D)[m].unsqueeze(0))[0]
         return out.view(B, T, D)
+
+    def _route_active_token(self, x, active):
+        """Route only live batch rows for one causal evaluation position."""
+        B, _, D = x.shape
+        mask = active.reshape(-1)
+        out = torch.zeros(B, D, device=x.device, dtype=x.dtype)
+        out[mask] = self._route(x[mask].reshape(1, -1, D))[0]
+        return out.unsqueeze(1)
 
     @staticmethod
     def _runs(e_sorted):
