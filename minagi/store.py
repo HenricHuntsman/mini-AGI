@@ -349,19 +349,38 @@ def load(model, path, opt=None, device=None, strict=False, verbose=False):
     device = device or next(model.parameters()).device
     with open(os.path.join(path, "manifest.json")) as f:
         man = json.load(f)
+    if not isinstance(man, dict):
+        raise ValueError("checkpoint manifest must be a JSON object")
     entries = man.get("experts")
-    if entries is not None:
+    if not isinstance(entries, list):
+        raise ValueError("checkpoint manifest must contain an experts list")
+    try:
         expected = int(man.get("n_experts", len(entries)))
-        if len(entries) != expected:
-            raise RuntimeError(
-                f"checkpoint manifest lists {len(entries)} expert files, "
-                f"but declares {expected} experts")
-        missing = [entry.get("file") for entry in entries
-                   if not os.path.isfile(os.path.join(
-                       path, EXPERTS, entry.get("file", "")))]
-        if missing:
-            raise FileNotFoundError(
-                f"checkpoint is missing expert files: {missing[:8]}")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid n_experts in checkpoint manifest") from exc
+    if expected < 0 or len(entries) != expected:
+        raise ValueError(
+            f"checkpoint manifest lists {len(entries)} expert files, "
+            f"but declares {expected} experts")
+    ids, names = set(), set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("checkpoint expert entry must be an object")
+        name, expert_id = entry.get("file"), entry.get("id")
+        if (not isinstance(name, str) or not name
+                or name in (".", "..") or "/" in name or chr(92) in name
+                or not name.endswith((".npz", ".npy"))):
+            raise ValueError("checkpoint expert filename is invalid")
+        if (type(expert_id) is not int or expert_id < 0
+                or expert_id in ids or name in names):
+            raise ValueError("checkpoint expert ID or filename is invalid/duplicate")
+        ids.add(expert_id)
+        names.add(name)
+    missing = [entry["file"] for entry in entries
+               if not os.path.isfile(os.path.join(path, EXPERTS, entry["file"]))]
+    if missing:
+        raise FileNotFoundError(
+            f"checkpoint is missing expert files: {missing[:8]}")
     sd = {}
     core = np.load(os.path.join(path, "core.npz"))
     routers = np.load(os.path.join(path, "routers.npz"))
