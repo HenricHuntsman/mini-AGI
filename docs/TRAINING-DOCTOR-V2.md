@@ -14,7 +14,7 @@ Four modes, none of which write to the model or its weights directory.
 ## Usage
 
 ```bash
-PY="$HOME/src/mini-AGI/.venv/bin/python"   # never bare python3: see AGENTS.md
+PY="$(pwd)/.venv/bin/python"   # from the repository root after venv setup
 
 # 1. A run's telemetry
 "$PY" training_doctor.py runs/agi/history.jsonl
@@ -28,6 +28,9 @@ PY="$HOME/src/mini-AGI/.venv/bin/python"   # never bare python3: see AGENTS.md
 # 4. What the model actually wrote, against the loss falling beside it
 "$PY" training_doctor.py --samples runs/samples.txt
 ```
+
+The Python path above is a local example, not a hard-coded installation path.
+Use the interpreter from your own environment; see [REBUILD.md](../REBUILD.md).
 
 `--json` emits machine-readable output, `--out PATH` also writes it. Exit code
 is 1 when health is `critical`, otherwise 0.
